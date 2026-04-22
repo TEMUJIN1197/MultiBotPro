@@ -1,0 +1,16 @@
+{
+  "MA1_Period": 5,
+  "MA2_Period": 25,
+  "Box_Lookback": 2,
+  "ADX_Period": 10,
+  "ADX_MinLevel": 15.0,
+  "CurrencyStrengthDelta": 2.0,
+  "GridMultiplier": 0.0,
+  "NLP_Killswitch": false,
+  "Score": -1.0002,
+  "MaxDrawdown": 0.0,
+  "Trades": 0,
+  "schema_version": "v3",
+  "run_id": 1772971304,
+  "Updated": "2026-03-08T12:01:44.624053Z"
+}
