@@ -162,12 +162,19 @@ string G_LastWorkerTemplateSignature = "";
 string G_RuntimeCoordinatorKey = "";
 string G_RuntimeAssignedWorkerSymbol = "";
 string G_RuntimeAssignedChartSymbol = "";
+string G_RuntimeAssignedSymbolsCsv = "";
+string G_RuntimeAssignedWorkerSignature = "";
+string G_RuntimeAssignedSymbols[];
 
 #define MBP_UI_COMMAND_QUEUE_CAPACITY 16
 
 struct SMbpWorkerSlot
 {
    string symbol;
+   string symbolsCsv;
+   string chartSymbol;
+   string assignmentSignature;
+   int    assignedCount;
    long   chartId;
    ulong  lastLaunchAttemptMs;
    datetime lastHeartbeat;
@@ -289,6 +296,7 @@ input group "=== 00. Runtime, Data & Backend ==="
 input ENUM_BOT_MODE BotSystemMode = BOT_MODE_STANDALONE; // Bot role
 input ENUM_MBP_RUNTIME_ROLE InpRuntimeRole = MBP_RUNTIME_LEGACY; // Parallel runtime role
 input bool InpAutoSpawnWorkerCharts = true; // Auto-switch master into coordinator runtime
+input int InpParallelMaxWorkerCharts = 8; // Max worker charts (overflow stays on last worker)
 input ENUM_MBP_DATA_MODE InpDataMode = MBP_DATA_LIVE; // Price engine
 input ENUM_COMPUTE_BACKEND InpPrimaryComputeBackend = COMPUTE_BACKEND_DLL; // Primary compute backend
 input bool InpAutoFailoverToPython = true; // Auto fallback to Python
@@ -1264,20 +1272,25 @@ string MBP_WorkerHeartbeatFile(const string symbol, const string coordinatorKey 
 
 string MBP_ReadTextFileCommon(const string fileName)
 {
-   int handle = FileOpen(fileName, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   int handle = FileOpen(fileName, FILE_READ|FILE_BIN|FILE_COMMON);
    if(handle == INVALID_HANDLE)
       return "";
 
-   string payload = "";
-   while(!FileIsEnding(handle))
+   int payloadSize = (int)FileSize(handle);
+   if(payloadSize <= 0)
    {
-      string line = FileReadString(handle);
-      if(payload != "")
-         payload += "\n";
-      payload += line;
+      FileClose(handle);
+      return "";
    }
+
+   uchar payloadBytes[];
+   ArrayResize(payloadBytes, payloadSize);
+   int bytesRead = (int)FileReadArray(handle, payloadBytes, 0, payloadSize);
    FileClose(handle);
-   return payload;
+   if(bytesRead <= 0)
+      return "";
+
+   return CharArrayToString(payloadBytes, 0, bytesRead, CP_ACP);
 }
 
 string MBP_ReadKeyValue(const string payload, const string key)
@@ -1306,6 +1319,128 @@ bool MBP_IsChartAlive(const long chartId)
    return (chartSymbol != "");
 }
 
+int MBP_GetParallelWorkerCap()
+{
+   return MathMax(1, InpParallelMaxWorkerCharts);
+}
+
+int MBP_ParseSymbolCsv(const string csv, string &outSymbols[])
+{
+   ArrayResize(outSymbols, 0);
+
+   if(csv == "")
+      return 0;
+
+   string parts[];
+   int count = StringSplit(csv, ',', parts);
+   for(int i = 0; i < count; i++)
+   {
+      string symbol = TrimString(parts[i]);
+      if(symbol == "")
+         continue;
+
+      bool duplicate = false;
+      for(int j = 0; j < ArraySize(outSymbols); j++)
+      {
+         if(StringCompare(outSymbols[j], symbol, false) == 0)
+         {
+            duplicate = true;
+            break;
+         }
+      }
+      if(duplicate)
+         continue;
+
+      int next = ArraySize(outSymbols);
+      ArrayResize(outSymbols, next + 1);
+      outSymbols[next] = symbol;
+   }
+
+   return ArraySize(outSymbols);
+}
+
+string MBP_JoinSymbolSlice(string &symbols[], const int startIndex, const int endIndex)
+{
+   string csv = "";
+   int total = ArraySize(symbols);
+   if(total <= 0)
+      return csv;
+
+   int safeStart = MathMax(0, startIndex);
+   int safeEnd = MathMin(total - 1, endIndex);
+   for(int i = safeStart; i <= safeEnd; i++)
+   {
+      string symbol = TrimString(symbols[i]);
+      if(symbol == "")
+         continue;
+
+      if(csv != "")
+         csv += ",";
+      csv += symbol;
+   }
+
+   return csv;
+}
+
+string MBP_GetAssignedWorkerHeartbeatSymbol()
+{
+   string workerSymbol = G_RuntimeAssignedWorkerSymbol;
+   if(workerSymbol == "" && ArraySize(G_RuntimeAssignedSymbols) > 0)
+      workerSymbol = G_RuntimeAssignedSymbols[0];
+   if(workerSymbol == "")
+      workerSymbol = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
+   if(workerSymbol == "")
+      workerSymbol = GetBaseSymbol(_Symbol);
+   if(workerSymbol == "")
+      workerSymbol = _Symbol;
+
+   return workerSymbol;
+}
+
+string MBP_GetAssignedWorkerSymbolsCsv()
+{
+   if(G_RuntimeAssignedSymbolsCsv != "")
+      return G_RuntimeAssignedSymbolsCsv;
+
+   string workerSymbol = MBP_GetAssignedWorkerHeartbeatSymbol();
+   return workerSymbol;
+}
+
+bool MBP_RuntimeWorkerOwnsSymbol(const string symbol)
+{
+   string target = GetBaseSymbol(symbol);
+   if(target == "")
+      target = symbol;
+   if(target == "")
+      return false;
+
+   if(ArraySize(G_RuntimeAssignedSymbols) > 0)
+   {
+      for(int i = 0; i < ArraySize(G_RuntimeAssignedSymbols); i++)
+      {
+         string owned = GetBaseSymbol(G_RuntimeAssignedSymbols[i]);
+         if(owned == "")
+            owned = G_RuntimeAssignedSymbols[i];
+         if(StringCompare(owned, target, false) == 0)
+            return true;
+      }
+      return false;
+   }
+
+   string workerSymbol = MBP_GetAssignedWorkerHeartbeatSymbol();
+   return (StringCompare(workerSymbol, target, false) == 0);
+}
+
+string MBP_BuildWorkerAssignmentSignature(const string primarySymbol,
+                                         const string chartSymbol,
+                                         const string symbolsCsv)
+{
+   return MBP_SanitizeRuntimeToken(primarySymbol) + "|" +
+          MBP_SanitizeRuntimeToken(chartSymbol) + "|" +
+          MBP_SanitizeRuntimeToken(symbolsCsv) + "|" +
+          IntegerToString((int)InpDataMode);
+}
+
 int MBP_FindWorkerSlot(const string symbol)
 {
    string target = GetBaseSymbol(symbol);
@@ -1323,13 +1458,15 @@ int MBP_FindWorkerSlot(const string symbol)
 
 void MBP_EnsureWorkerSlots()
 {
+   string requestedSymbols[];
+   ArrayResize(requestedSymbols, 0);
+
    if(ArraySize(TradingSymbols) <= 0)
    {
       ArrayResize(G_WorkerSlots, 0);
       return;
    }
 
-   int count = 0;
    for(int i = 0; i < ArraySize(TradingSymbols); i++)
    {
       string baseSymbol = GetBaseSymbol(TradingSymbols[i]);
@@ -1339,9 +1476,9 @@ void MBP_EnsureWorkerSlots()
          continue;
 
       bool duplicate = false;
-      for(int j = 0; j < count; j++)
+      for(int j = 0; j < ArraySize(requestedSymbols); j++)
       {
-         if(StringCompare(G_WorkerSlots[j].symbol, baseSymbol, false) == 0)
+         if(StringCompare(requestedSymbols[j], baseSymbol, false) == 0)
          {
             duplicate = true;
             break;
@@ -1350,27 +1487,96 @@ void MBP_EnsureWorkerSlots()
       if(duplicate)
          continue;
 
-      ArrayResize(G_WorkerSlots, count + 1);
-      G_WorkerSlots[count].symbol = baseSymbol;
-      if(G_WorkerSlots[count].chartId <= 0)
-         G_WorkerSlots[count].chartId = 0;
-      count++;
+      int next = ArraySize(requestedSymbols);
+      ArrayResize(requestedSymbols, next + 1);
+      requestedSymbols[next] = baseSymbol;
    }
 
-   ArrayResize(G_WorkerSlots, count);
+   int requestedCount = ArraySize(requestedSymbols);
+   if(requestedCount <= 0)
+   {
+      ArrayResize(G_WorkerSlots, 0);
+      return;
+   }
+
+   SMbpWorkerSlot previousSlots[];
+   ArrayResize(previousSlots, ArraySize(G_WorkerSlots));
+   for(int i = 0; i < ArraySize(G_WorkerSlots); i++)
+      previousSlots[i] = G_WorkerSlots[i];
+
+   int maxWorkerCharts = MBP_GetParallelWorkerCap();
+   int slotCount = MathMin(requestedCount, maxWorkerCharts);
+   ArrayResize(G_WorkerSlots, slotCount);
+
+   for(int slotIndex = 0; slotIndex < slotCount; slotIndex++)
+   {
+      int startIndex = slotIndex;
+      int endIndex = (slotIndex == slotCount - 1) ? (requestedCount - 1) : slotIndex;
+
+      string primarySymbol = requestedSymbols[startIndex];
+      string symbolsCsv = MBP_JoinSymbolSlice(requestedSymbols, startIndex, endIndex);
+      string chartSymbol = MBP_IsSyntheticDataMode(InpDataMode)
+                           ? ResolveSyntheticChartSymbolName(primarySymbol, InpDataMode)
+                           : primarySymbol;
+      string signature = MBP_BuildWorkerAssignmentSignature(primarySymbol, chartSymbol, symbolsCsv);
+
+      int previousIndex = -1;
+      for(int j = 0; j < ArraySize(previousSlots); j++)
+      {
+         if(previousSlots[j].assignmentSignature == signature)
+         {
+            previousIndex = j;
+            break;
+         }
+      }
+      if(previousIndex < 0)
+      {
+         for(int j = 0; j < ArraySize(previousSlots); j++)
+         {
+            if(StringCompare(previousSlots[j].symbol, primarySymbol, false) == 0)
+            {
+               previousIndex = j;
+               break;
+            }
+         }
+      }
+
+      G_WorkerSlots[slotIndex].symbol = primarySymbol;
+      G_WorkerSlots[slotIndex].symbolsCsv = symbolsCsv;
+      G_WorkerSlots[slotIndex].chartSymbol = chartSymbol;
+      G_WorkerSlots[slotIndex].assignmentSignature = signature;
+      G_WorkerSlots[slotIndex].assignedCount = (endIndex - startIndex + 1);
+
+      if(previousIndex >= 0)
+      {
+         G_WorkerSlots[slotIndex].chartId = previousSlots[previousIndex].chartId;
+         G_WorkerSlots[slotIndex].lastLaunchAttemptMs = previousSlots[previousIndex].lastLaunchAttemptMs;
+         G_WorkerSlots[slotIndex].lastHeartbeat = previousSlots[previousIndex].lastHeartbeat;
+      }
+      else
+      {
+         G_WorkerSlots[slotIndex].chartId = 0;
+         G_WorkerSlots[slotIndex].lastLaunchAttemptMs = 0;
+         G_WorkerSlots[slotIndex].lastHeartbeat = 0;
+      }
+   }
 }
 
 bool MBP_WriteWorkerAssignment(const long chartId,
                               const string symbol,
+                              const string symbolsCsv,
                               const string chartSymbol,
-                              const string coordinatorKey)
+                              const string coordinatorKey,
+                              const string assignmentSignature)
 {
    int handle = FileOpen(MBP_WorkerAssignmentFile(chartId), FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle == INVALID_HANDLE)
       return false;
 
    FileWriteString(handle, "symbol=" + symbol + "\r\n");
+   FileWriteString(handle, "symbols=" + symbolsCsv + "\r\n");
    FileWriteString(handle, "chart_symbol=" + chartSymbol + "\r\n");
+   FileWriteString(handle, "signature=" + assignmentSignature + "\r\n");
    FileWriteString(handle, StringFormat("chart_id=%I64d\r\n", chartId));
    FileWriteString(handle, StringFormat("coordinator_chart=%I64d\r\n", ChartID()));
    FileWriteString(handle, "coordinator_key=" + coordinatorKey + "\r\n");
@@ -1381,34 +1587,50 @@ bool MBP_WriteWorkerAssignment(const long chartId,
 
 bool MBP_ReadWorkerAssignment(const long chartId,
                               string &outSymbol,
+                              string &outSymbolsCsv,
                               string &outChartSymbol,
                               string &outCoordinatorKey,
-                              long &outCoordinatorChartId)
+                              long &outCoordinatorChartId,
+                              string &outAssignmentSignature)
 {
    outSymbol = "";
-    outChartSymbol = "";
+   outSymbolsCsv = "";
+   outChartSymbol = "";
    outCoordinatorKey = "";
    outCoordinatorChartId = 0;
+   outAssignmentSignature = "";
    string payload = MBP_ReadTextFileCommon(MBP_WorkerAssignmentFile(chartId));
    if(payload == "")
       return false;
 
    outSymbol = MBP_ReadKeyValue(payload, "symbol");
+   outSymbolsCsv = MBP_ReadKeyValue(payload, "symbols");
+   if(outSymbolsCsv == "")
+      outSymbolsCsv = outSymbol;
    outChartSymbol = MBP_ReadKeyValue(payload, "chart_symbol");
+   outAssignmentSignature = MBP_ReadKeyValue(payload, "signature");
    outCoordinatorKey = MBP_ReadKeyValue(payload, "coordinator_key");
    string coordinatorChartValue = MBP_ReadKeyValue(payload, "coordinator_chart");
    if(coordinatorChartValue != "")
       outCoordinatorChartId = (long)StringToInteger(coordinatorChartValue);
+
+   if(outAssignmentSignature == "")
+      outAssignmentSignature = MBP_BuildWorkerAssignmentSignature(outSymbol, outChartSymbol, outSymbolsCsv);
+
    return (outSymbol != "");
 }
 
 bool MBP_ReadWorkerHeartbeat(const string symbol,
                              const string coordinatorKey,
                              datetime &outHeartbeat,
-                             long &outChartId)
+                             long &outChartId,
+                             string &outSymbolsCsv,
+                             string &outAssignmentSignature)
 {
    outHeartbeat = 0;
    outChartId = 0;
+   outSymbolsCsv = "";
+   outAssignmentSignature = "";
 
    string payload = MBP_ReadTextFileCommon(MBP_WorkerHeartbeatFile(symbol, coordinatorKey));
    if(payload == "")
@@ -1421,6 +1643,8 @@ bool MBP_ReadWorkerHeartbeat(const string symbol,
 
    outHeartbeat = (datetime)StringToInteger(heartbeatValue);
    outChartId = (long)StringToInteger(chartIdValue);
+   outSymbolsCsv = MBP_ReadKeyValue(payload, "symbols");
+   outAssignmentSignature = MBP_ReadKeyValue(payload, "signature");
    return (outHeartbeat > 0 && outChartId > 0);
 }
 
@@ -1430,15 +1654,27 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
       return MBP_RUNTIME_WORKER;
 
    string assignedSymbol = "";
+   string assignedSymbolsCsv = "";
    string assignedChartSymbol = "";
    string assignedCoordinatorKey = "";
    long assignedCoordinatorChartId = 0;
-   if(MBP_ReadWorkerAssignment(ChartID(), assignedSymbol, assignedChartSymbol, assignedCoordinatorKey, assignedCoordinatorChartId))
+   string assignedSignature = "";
+   if(MBP_ReadWorkerAssignment(ChartID(), assignedSymbol, assignedSymbolsCsv, assignedChartSymbol, assignedCoordinatorKey, assignedCoordinatorChartId, assignedSignature))
    {
       G_RuntimeAssignedWorkerSymbol = assignedSymbol;
+      G_RuntimeAssignedSymbolsCsv = assignedSymbolsCsv;
       G_RuntimeAssignedChartSymbol = assignedChartSymbol;
+      G_RuntimeAssignedWorkerSignature = assignedSignature;
+      MBP_ParseSymbolCsv(G_RuntimeAssignedSymbolsCsv, G_RuntimeAssignedSymbols);
+      if(G_RuntimeAssignedWorkerSymbol == "" && ArraySize(G_RuntimeAssignedSymbols) > 0)
+         G_RuntimeAssignedWorkerSymbol = G_RuntimeAssignedSymbols[0];
       if(G_RuntimeAssignedChartSymbol == "")
          G_RuntimeAssignedChartSymbol = ChartSymbol(0);
+      if(ArraySize(G_RuntimeAssignedSymbols) <= 0 && G_RuntimeAssignedWorkerSymbol != "")
+      {
+         ArrayResize(G_RuntimeAssignedSymbols, 1);
+         G_RuntimeAssignedSymbols[0] = G_RuntimeAssignedWorkerSymbol;
+      }
       if(assignedCoordinatorKey == "" && assignedCoordinatorChartId > 0)
          assignedCoordinatorKey = StringFormat("%s_%I64d",
                                                MBP_SanitizeRuntimeToken(InpHedgeChannel),
@@ -1553,7 +1789,7 @@ string ShadowMaster_BuildRuntimeConfigJson()
    string mt5FilesPath = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files";
    string symbolsJson = ShadowMaster_BuildRuntimeSymbolsJson();
    int cycleHours = MathMax(1, InpShadowMasterCycleHours);
-   int maxWorkers = MathMax(1, MathMin(8, ArraySize(SymbolData)));
+   int maxWorkers = MathMax(1, MathMin(MBP_GetParallelWorkerCap(), ArraySize(SymbolData)));
 
    string json = "{\r\n";
    json += "  \"version\": \"1.0\",\r\n";
@@ -1731,9 +1967,21 @@ void MasterPublishWorkerHeartbeat()
    if(handle == INVALID_HANDLE)
       return;
 
+   string assignedSymbolsCsv = MBP_GetAssignedWorkerSymbolsCsv();
+   string assignedChartSymbol = G_RuntimeAssignedChartSymbol;
+   if(assignedChartSymbol == "")
+      assignedChartSymbol = ChartSymbol(0);
+   string assignmentSignature = G_RuntimeAssignedWorkerSignature;
+   if(assignmentSignature == "")
+      assignmentSignature = MBP_BuildWorkerAssignmentSignature(workerSymbol, assignedChartSymbol, assignedSymbolsCsv);
+
    FileWriteString(handle, "symbol=" + workerSymbol + "\r\n");
-   if(G_RuntimeAssignedChartSymbol != "")
-      FileWriteString(handle, "chart_symbol=" + G_RuntimeAssignedChartSymbol + "\r\n");
+   if(assignedChartSymbol != "")
+      FileWriteString(handle, "chart_symbol=" + assignedChartSymbol + "\r\n");
+   if(assignedSymbolsCsv != "")
+      FileWriteString(handle, "symbols=" + assignedSymbolsCsv + "\r\n");
+   if(assignmentSignature != "")
+      FileWriteString(handle, "signature=" + assignmentSignature + "\r\n");
    FileWriteString(handle, StringFormat("chart_id=%I64d\r\n", ChartID()));
    FileWriteString(handle, "heartbeat=" + IntegerToString((int)TimeCurrent()) + "\r\n");
    FileWriteString(handle, "positions=" + IntegerToString(linkedPositions) + "\r\n");
@@ -1790,10 +2038,11 @@ void MasterEnsureRuntimeWorkers()
       if(baseSymbol == "")
          continue;
 
-      string workerChartSymbol = baseSymbol;
+      string workerChartSymbol = G_WorkerSlots[i].chartSymbol;
+      if(workerChartSymbol == "")
+         workerChartSymbol = baseSymbol;
       if(MBP_IsSyntheticDataMode(InpDataMode))
       {
-         workerChartSymbol = ResolveSyntheticChartSymbolName(baseSymbol, InpDataMode);
          bool customReady = (bool)SymbolInfoInteger(workerChartSymbol, SYMBOL_CUSTOM);
          if(!customReady)
          {
@@ -1820,9 +2069,27 @@ void MasterEnsureRuntimeWorkers()
 
       datetime heartbeat = 0;
       long heartbeatChartId = 0;
-      bool hasHeartbeat = MBP_ReadWorkerHeartbeat(baseSymbol, coordinatorKey, heartbeat, heartbeatChartId);
+      string heartbeatSymbolsCsv = "";
+      string heartbeatSignature = "";
+      bool hasHeartbeat = MBP_ReadWorkerHeartbeat(baseSymbol,
+                                                 coordinatorKey,
+                                                 heartbeat,
+                                                 heartbeatChartId,
+                                                 heartbeatSymbolsCsv,
+                                                 heartbeatSignature);
       bool chartAlive = (heartbeatChartId > 0 && MBP_IsChartAlive(heartbeatChartId));
-      bool heartbeatFresh = (hasHeartbeat && chartAlive && ((TimeCurrent() - heartbeat) <= (int)heartbeatTtlSec));
+      bool assignmentMatches = true;
+      if(hasHeartbeat)
+      {
+         if(heartbeatSignature != "")
+            assignmentMatches = (StringCompare(heartbeatSignature, G_WorkerSlots[i].assignmentSignature, false) == 0);
+         else if(heartbeatSymbolsCsv != "")
+            assignmentMatches = (StringCompare(heartbeatSymbolsCsv, G_WorkerSlots[i].symbolsCsv, false) == 0);
+      }
+      bool heartbeatFresh = (hasHeartbeat &&
+                             assignmentMatches &&
+                             chartAlive &&
+                             ((TimeCurrent() - heartbeat) <= (int)heartbeatTtlSec));
 
       if(heartbeatFresh)
       {
@@ -1850,7 +2117,12 @@ void MasterEnsureRuntimeWorkers()
 
       ApplyChartStyles(targetChartId);
 
-      if(!MBP_WriteWorkerAssignment(targetChartId, baseSymbol, workerChartSymbol, coordinatorKey))
+      if(!MBP_WriteWorkerAssignment(targetChartId,
+                                    G_WorkerSlots[i].symbol,
+                                    G_WorkerSlots[i].symbolsCsv,
+                                    workerChartSymbol,
+                                    coordinatorKey,
+                                    G_WorkerSlots[i].assignmentSignature))
       {
          Print(EmojiWarning(), " Failed to stamp worker assignment for ", baseSymbol, " on chart ", targetChartId);
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
@@ -3287,10 +3559,6 @@ void Master_OnDeinit(const int reason)
       string heartbeatFile = MBP_WorkerHeartbeatFile(workerSymbol, G_RuntimeCoordinatorKey);
       if(FileIsExist(heartbeatFile, FILE_COMMON))
          FileDelete(heartbeatFile, FILE_COMMON);
-
-      string assignmentFile = MBP_WorkerAssignmentFile(ChartID());
-      if(FileIsExist(assignmentFile, FILE_COMMON))
-         FileDelete(assignmentFile, FILE_COMMON);
    }
 
    if(IsBridgeRuntimeEnabled() && !IsParallelWorkerMode())

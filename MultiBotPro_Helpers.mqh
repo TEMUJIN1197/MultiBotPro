@@ -1245,16 +1245,35 @@ void BuildSymbolList()
 
    if(IsParallelWorkerMode())
      {
-      string workerSymbol = G_RuntimeAssignedWorkerSymbol;
-      if(workerSymbol == "")
-         workerSymbol = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
-      if(workerSymbol == "")
-         workerSymbol = GetBaseSymbol(_Symbol);
-      if(workerSymbol == "")
-         workerSymbol = _Symbol;
+      string assignedSymbols[];
+      ArrayResize(assignedSymbols, 0);
 
-      if(workerSymbol != "")
-         AppendTradingSymbolIfMissing(workerSymbol);
+      if(ArraySize(G_RuntimeAssignedSymbols) > 0)
+         ArrayCopy(assignedSymbols, G_RuntimeAssignedSymbols);
+      else if(G_RuntimeAssignedSymbolsCsv != "")
+         MBP_ParseSymbolCsv(G_RuntimeAssignedSymbolsCsv, assignedSymbols);
+
+      for(int i = 0; i < ArraySize(assignedSymbols); i++)
+      {
+         string assignedSymbol = TrimString(assignedSymbols[i]);
+         if(assignedSymbol == "")
+            continue;
+         AppendTradingSymbolIfMissing(assignedSymbol);
+      }
+
+      if(ArraySize(TradingSymbols) <= 0)
+      {
+         string workerSymbol = G_RuntimeAssignedWorkerSymbol;
+         if(workerSymbol == "")
+            workerSymbol = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
+         if(workerSymbol == "")
+            workerSymbol = GetBaseSymbol(_Symbol);
+         if(workerSymbol == "")
+            workerSymbol = _Symbol;
+
+         if(workerSymbol != "")
+            AppendTradingSymbolIfMissing(workerSymbol);
+      }
 
       TradingSymbolsCount = ArraySize(TradingSymbols);
       return;
