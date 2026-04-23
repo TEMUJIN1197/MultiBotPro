@@ -398,11 +398,24 @@ bool PrepareSymbolStartupChart(int symbolIndex, ENUM_MBP_DATA_MODE requestedMode
    }
 
    analysisSymbol = ResolveSyntheticChartSymbolName(baseSym, requestedMode);
+   bool shouldOpenDedicatedChart = true;
+   if(IsParallelWorkerMode())
+   {
+      string workerPrimaryBase = G_RuntimeAssignedWorkerSymbol;
+      if(workerPrimaryBase == "")
+         workerPrimaryBase = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
+      if(workerPrimaryBase == "")
+         workerPrimaryBase = GetBaseSymbol(_Symbol);
+      if(workerPrimaryBase == "")
+         workerPrimaryBase = baseSym;
+
+      shouldOpenDedicatedChart = (StringCompare(workerPrimaryBase, baseSym, false) == 0);
+   }
 
    CChartFactory *factory = GetStartupFactoryForMode(symbolIndex, requestedMode);
    if(CheckPointer(factory) != POINTER_INVALID)
    {
-      if(factory.PrepareStartup(1, 1))
+      if(factory.PrepareStartup(1, 1, shouldOpenDedicatedChart))
       {
          analysisSymbol = factory.GetCustomSymbol();
          if(SymbolSelect(analysisSymbol, true))
@@ -417,7 +430,10 @@ bool PrepareSymbolStartupChart(int symbolIndex, ENUM_MBP_DATA_MODE requestedMode
             SymbolData[symbolIndex].LastTickMsc = startupTickMsc;
             SymbolData[symbolIndex].LastProcessedSourceTickMsc = startupTickMsc;
             SymbolData[symbolIndex].LastProcessedSourceTickCountAtMsc = (startupTickMsc > 0) ? 1 : 0;
-            Print("[MasterRuntime] Analysis symbol ready for ", baseSym, " -> ", analysisSymbol, ".");
+            if(shouldOpenDedicatedChart)
+               Print("[MasterRuntime] Analysis symbol ready for ", baseSym, " -> ", analysisSymbol, ".");
+            else
+               Print("[MasterRuntime] Analysis symbol ready for ", baseSym, " -> ", analysisSymbol, " (headless worker assignment).");
             return true;
          }
          Print("[MasterRuntime] WARNING: Analysis symbol activation failed for ", analysisSymbol, ".");

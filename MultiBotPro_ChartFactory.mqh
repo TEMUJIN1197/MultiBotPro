@@ -98,7 +98,7 @@ public:
       }
    }
 
-   bool EnsureStartupShell(const int openAttempts = 5)
+   bool EnsureStartupShell(const int openAttempts = 5, const bool openChart = true)
    {
       if(m_chartType == MBP_CHART_STANDARD)
          return true;
@@ -106,21 +106,26 @@ public:
       if(!EnsureCustomSymbol(m_symbol, m_customSymbol))
          return false;
 
-      EnsureChartOpen(openAttempts);
+      if(openChart)
+         EnsureChartOpen(openAttempts);
+      else
+         m_chartID = 0;
       BindChartToEngine();
       return true;
    }
 
-   bool PrepareStartup(const int openAttempts = 5, const int historyAttempts = 5)
+   bool PrepareStartup(const int openAttempts = 5,
+                       const int historyAttempts = 5,
+                       const bool openChart = true)
    {
       if(m_chartType == MBP_CHART_STANDARD) return true;
       if(m_isPrepared && HasUsableHistory())
       {
-         EnsureStartupShell(openAttempts);
+         EnsureStartupShell(openAttempts, openChart);
          return true;
       }
 
-      if(!EnsureStartupShell(openAttempts))
+      if(!EnsureStartupShell(openAttempts, openChart))
          return false;
 
       bool success = false;
