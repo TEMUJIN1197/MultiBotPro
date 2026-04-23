@@ -1319,6 +1319,19 @@ bool MBP_IsChartAlive(const long chartId)
    return (chartSymbol != "");
 }
 
+long MBP_FindReusableChartBySymbol(const string symbol, const long excludedChartId = 0)
+{
+   long chartId = ChartFirst();
+   while(chartId >= 0)
+   {
+      if(chartId != excludedChartId && StringCompare(ChartSymbol(chartId), symbol, false) == 0)
+         return chartId;
+      chartId = ChartNext(chartId);
+   }
+
+   return 0;
+}
+
 int MBP_GetParallelWorkerCap()
 {
    return MathMax(1, InpParallelMaxWorkerCharts);
@@ -1650,9 +1663,6 @@ bool MBP_ReadWorkerHeartbeat(const string symbol,
 
 ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
 {
-   if(InpRuntimeRole == MBP_RUNTIME_WORKER)
-      return MBP_RUNTIME_WORKER;
-
    string assignedSymbol = "";
    string assignedSymbolsCsv = "";
    string assignedChartSymbol = "";
@@ -1683,22 +1693,20 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
       return MBP_RUNTIME_WORKER;
    }
 
+   if(BotSystemMode == BOT_MODE_MASTER && InpAutoSpawnWorkerCharts)
+   {
+      G_RuntimeCoordinatorKey = MBP_DefaultCoordinatorKey();
+      return MBP_RUNTIME_COORDINATOR;
+   }
+
    if(InpRuntimeRole == MBP_RUNTIME_COORDINATOR)
    {
       G_RuntimeCoordinatorKey = MBP_DefaultCoordinatorKey();
       return MBP_RUNTIME_COORDINATOR;
    }
 
-   if(BotSystemMode == BOT_MODE_MASTER && InpAutoSpawnWorkerCharts)
-   {
-      bool multiSymbolManual = (StringFind(ManualSymbols, ",") >= 0);
-      bool shouldCoordinatorBootstrap = (TradeAllMarketWatch || multiSymbolManual);
-      if(shouldCoordinatorBootstrap)
-      {
-         G_RuntimeCoordinatorKey = MBP_DefaultCoordinatorKey();
-         return MBP_RUNTIME_COORDINATOR;
-      }
-   }
+   if(InpRuntimeRole == MBP_RUNTIME_WORKER)
+      return MBP_RUNTIME_WORKER;
 
    G_RuntimeCoordinatorKey = MBP_SanitizeRuntimeToken(InpHedgeChannel);
    return InpRuntimeRole;
@@ -2028,6 +2036,7 @@ void MasterEnsureRuntimeWorkers()
       return;
 
    uint heartbeatTtlSec = (uint)MathMax(5, (MathMax(250, InpParallelWorkerHeartbeatMs) * 4 + 999) / 1000);
+   ulong relaunchGraceMs = (ulong)MathMax(4000, MathMax(250, InpParallelWorkerHeartbeatMs) * 6);
    string templateName = MBP_WorkerTemplateName();
    ENUM_TIMEFRAMES targetPeriod = (ENUM_TIMEFRAMES)ChartPeriod(0);
    string coordinatorKey = MBP_GetActiveCoordinatorKey();
@@ -2098,12 +2107,15 @@ void MasterEnsureRuntimeWorkers()
          continue;
       }
 
-      if((nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < 1500)
+      if((nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs)
          continue;
 
       long targetChartId = G_WorkerSlots[i].chartId;
       if(!MBP_IsChartAlive(targetChartId) || StringCompare(ChartSymbol(targetChartId), workerChartSymbol, false) != 0)
          targetChartId = 0;
+
+      if(targetChartId <= 0)
+         targetChartId = MBP_FindReusableChartBySymbol(workerChartSymbol, ChartID());
 
       if(targetChartId <= 0)
          targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
@@ -3227,11 +3239,16 @@ void ClearMasterReinitMarker()
 int Master_OnInit()
   {
    ResetSystemSnapshot();
-   if(!VerifyLicense())
+   if(IsParallelWorkerMode())
      {
+      G_LicenseValid = true;
+      Print(EmojiLock(), " Worker runtime detected. Reusing coordinator license session.");
+     }
+   else if(!VerifyLicense())
+   {
       Print("FATAL: MultiBotPro initialization aborted due to invalid license.");
       return INIT_FAILED;
-     }
+   }
    G_IS_DEINIT = false;
    G_InitInProgress = true;
    Comment("... loading ...");
@@ -3726,27 +3743,30 @@ void Master_OnTimer()
       ProcessDeferredBoxHistoryWarmup();
 
    // --- CONTINUOUS LICENSE VERIFICATION ---
-   static int auth_timer_ticks = 0;
-   auth_timer_ticks++;
-   if(auth_timer_ticks >= 28800) 
+   if(!IsParallelWorkerMode())
    {
-      Print(EmojiBrain(), " Running background license verification...");
-      if(!VerifyLicense())
+      static int auth_timer_ticks = 0;
+      auth_timer_ticks++;
+      if(auth_timer_ticks >= 28800) 
       {
-         Print(EmojiWarning(), " Subscription expired mid-session. Executing a hard shutdown.");
-         // ... (keep the rest of the shutdown loop)
-         for(int i=0; i<ArraySize(SymbolData); i++)
+         Print(EmojiBrain(), " Running background license verification...");
+         if(!VerifyLicense())
          {
-            if(SymbolData[i].active)
+            Print(EmojiWarning(), " Subscription expired mid-session. Executing a hard shutdown.");
+            // ... (keep the rest of the shutdown loop)
+            for(int i=0; i<ArraySize(SymbolData); i++)
             {
-               CloseAllGridPositions(i, "License Expired");
-               ResetGridTracking(i);
+               if(SymbolData[i].active)
+               {
+                  CloseAllGridPositions(i, "License Expired");
+                  ResetGridTracking(i);
+               }
             }
+            CloseAllGlobalPositions("License Expired");
+            ExpertRemove(); 
          }
-         CloseAllGlobalPositions("License Expired");
-         ExpertRemove(); 
+         auth_timer_ticks = 0;
       }
-      auth_timer_ticks = 0;
    }
      
    // --- STRATEGY TESTER CHART MANAGER ---
@@ -5056,6 +5076,12 @@ void ClearLicenseCache(const long account)
 
 bool VerifyLicense()
   {
+   if(IsParallelWorkerMode())
+     {
+      G_LicenseValid = true;
+      return true;
+     }
+
    // --- STRATEGY TESTER BYPASS ---
    if(MQLInfoInteger(MQL_TESTER))
      {

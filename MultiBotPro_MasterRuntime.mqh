@@ -342,20 +342,39 @@ void BatchOpenSyntheticChartWindows(const ENUM_MBP_DATA_MODE requestedMode)
    if(!MBP_IsSyntheticDataMode(requestedMode))
       return;
 
+   bool openedVisibleChart = false;
    for(int i = 0; i < ArraySize(SymbolData); i++)
    {
       CChartFactory *factory = GetStartupFactoryForMode(i, requestedMode);
       if(CheckPointer(factory) == POINTER_INVALID)
          continue;
 
-      if(factory.EnsureStartupShell(1))
-         Print("[MasterRuntime] Startup chart shell ready for ", factory.GetCustomSymbol(), ".");
+      string baseSym = GetManagedBaseSymbol(i);
+      if(baseSym == "")
+         baseSym = GetBaseSymbol(SymbolData[i].symbol);
+      if(baseSym == "")
+         baseSym = SymbolData[i].symbol;
+      bool shouldOpenDedicatedChart = WorkerShouldOpenDedicatedSyntheticChart(baseSym);
+
+      if(factory.EnsureStartupShell(1, shouldOpenDedicatedChart))
+      {
+         if(shouldOpenDedicatedChart)
+         {
+            openedVisibleChart = true;
+            Print("[MasterRuntime] Startup chart shell ready for ", factory.GetCustomSymbol(), ".");
+         }
+         else
+            Print("[MasterRuntime] Startup chart shell ready for ", factory.GetCustomSymbol(), " (headless worker assignment).");
+      }
       else
          Print("[MasterRuntime] WARNING: Failed to prepare startup shell for ", factory.GetCustomSymbol(), ".");
    }
 
-   ScheduleMasterHostVisibilityHeal(8000);
-   RestoreMasterHostChartFocus();
+   if(openedVisibleChart)
+   {
+      ScheduleMasterHostVisibilityHeal(8000);
+      RestoreMasterHostChartFocus();
+   }
 }
 
 void BatchPrepareSyntheticCharts(const ENUM_MBP_DATA_MODE requestedMode)
@@ -363,20 +382,55 @@ void BatchPrepareSyntheticCharts(const ENUM_MBP_DATA_MODE requestedMode)
    if(!MBP_IsSyntheticDataMode(requestedMode))
       return;
 
+   bool openedVisibleChart = false;
    for(int i = 0; i < ArraySize(SymbolData); i++)
    {
       CChartFactory *factory = GetStartupFactoryForMode(i, requestedMode);
       if(CheckPointer(factory) == POINTER_INVALID)
          continue;
 
-      if(factory.PrepareStartup(1, 1))
-         Print("[MasterRuntime] Synthetic startup ready for ", factory.GetCustomSymbol(), ".");
+      string baseSym = GetManagedBaseSymbol(i);
+      if(baseSym == "")
+         baseSym = GetBaseSymbol(SymbolData[i].symbol);
+      if(baseSym == "")
+         baseSym = SymbolData[i].symbol;
+      bool shouldOpenDedicatedChart = WorkerShouldOpenDedicatedSyntheticChart(baseSym);
+
+      if(factory.PrepareStartup(1, 1, shouldOpenDedicatedChart))
+      {
+         if(shouldOpenDedicatedChart)
+         {
+            openedVisibleChart = true;
+            Print("[MasterRuntime] Synthetic startup ready for ", factory.GetCustomSymbol(), ".");
+         }
+         else
+            Print("[MasterRuntime] Synthetic startup ready for ", factory.GetCustomSymbol(), " (headless worker assignment).");
+      }
       else
          Print("[MasterRuntime] WARNING: Synthetic startup exhausted retries for ", factory.GetCustomSymbol(), ".");
    }
 
-   ScheduleMasterHostVisibilityHeal(8000);
-   RestoreMasterHostChartFocus();
+   if(openedVisibleChart)
+   {
+      ScheduleMasterHostVisibilityHeal(8000);
+      RestoreMasterHostChartFocus();
+   }
+}
+
+bool WorkerShouldOpenDedicatedSyntheticChart(const string baseSymbol)
+{
+   if(!IsParallelWorkerMode())
+      return true;
+
+   string workerPrimaryBase = G_RuntimeAssignedWorkerSymbol;
+   if(workerPrimaryBase == "")
+      workerPrimaryBase = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
+   if(workerPrimaryBase == "")
+      workerPrimaryBase = GetBaseSymbol(_Symbol);
+   if(workerPrimaryBase == "")
+      workerPrimaryBase = baseSymbol;
+
+   return (StringCompare(workerPrimaryBase, baseSymbol, false) == 0);
 }
 
 bool PrepareSymbolStartupChart(int symbolIndex, ENUM_MBP_DATA_MODE requestedMode, string &analysisSymbol)
@@ -398,19 +452,7 @@ bool PrepareSymbolStartupChart(int symbolIndex, ENUM_MBP_DATA_MODE requestedMode
    }
 
    analysisSymbol = ResolveSyntheticChartSymbolName(baseSym, requestedMode);
-   bool shouldOpenDedicatedChart = true;
-   if(IsParallelWorkerMode())
-   {
-      string workerPrimaryBase = G_RuntimeAssignedWorkerSymbol;
-      if(workerPrimaryBase == "")
-         workerPrimaryBase = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
-      if(workerPrimaryBase == "")
-         workerPrimaryBase = GetBaseSymbol(_Symbol);
-      if(workerPrimaryBase == "")
-         workerPrimaryBase = baseSym;
-
-      shouldOpenDedicatedChart = (StringCompare(workerPrimaryBase, baseSym, false) == 0);
-   }
+   bool shouldOpenDedicatedChart = WorkerShouldOpenDedicatedSyntheticChart(baseSym);
 
    CChartFactory *factory = GetStartupFactoryForMode(symbolIndex, requestedMode);
    if(CheckPointer(factory) != POINTER_INVALID)
