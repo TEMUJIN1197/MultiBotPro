@@ -1270,7 +1270,12 @@ string MBP_ReadTextFileCommon(const string fileName)
 
    string payload = "";
    while(!FileIsEnding(handle))
-      payload += FileReadString(handle);
+   {
+      string line = FileReadString(handle);
+      if(payload != "")
+         payload += "\n";
+      payload += line;
+   }
    FileClose(handle);
    return payload;
 }
