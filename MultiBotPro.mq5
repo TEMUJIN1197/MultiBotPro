@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Expert Advisor Pro"
 #property link      "https://discord.com/channels/929723953415589918/929723953415589920"
-#property version   "2.00"
+#property version   "1.00"
 #property icon      "romeo.ico"
 #property description "Advanced Multi-Timeframe Multi-Symbol Trading Bot"
 #property description "Features: MA Cascade, VWAP Bands, Grid/Stack Modes"
@@ -1319,6 +1319,29 @@ bool MBP_IsChartAlive(const long chartId)
    return (chartSymbol != "");
 }
 
+bool MBP_WaitForChartTargetReady(const long chartId,
+                                 const string expectedSymbol,
+                                 const uint timeoutMs = 4000)
+{
+   if(chartId <= 0)
+      return false;
+
+   ulong startMs = GetTickCount();
+   while((GetTickCount() - startMs) <= timeoutMs)
+   {
+      if(MBP_IsChartAlive(chartId))
+      {
+         string chartSymbol = ChartSymbol(chartId);
+         if(expectedSymbol == "" || StringCompare(chartSymbol, expectedSymbol, false) == 0)
+            return true;
+      }
+
+      Sleep(100);
+   }
+
+   return false;
+}
+
 bool MBP_WriteWorkerHeartbeatRecord(const string workerSymbol,
                                     const string coordinatorKey,
                                     const string assignedChartSymbol,
@@ -1979,7 +2002,7 @@ string ShadowMaster_BuildRuntimeConfigJson()
    int maxWorkers = MathMax(1, MathMin(MBP_GetParallelWorkerCap(), ArraySize(SymbolData)));
 
    string json = "{\r\n";
-   json += "  \"version\": \"2.0\",\r\n";
+   json += "  \"version\": \"1.0\",\r\n";
    json += "  \"sqlite_path\": \"" + ShadowMaster_JsonEscape(sqlitePath) + "\",\r\n";
    json += "  \"mt5_data_dir\": \"" + ShadowMaster_JsonEscape(mt5FilesPath) + "\",\r\n";
    json += "  \"network\": {\r\n";
@@ -2306,26 +2329,33 @@ void MasterEnsureRuntimeWorkers()
       bool slotChartAlive = (G_WorkerSlots[i].chartId > 0 &&
                              MBP_IsChartAlive(G_WorkerSlots[i].chartId) &&
                              StringCompare(ChartSymbol(G_WorkerSlots[i].chartId), workerChartSymbol, false) == 0);
-      if(slotChartAlive)
-         continue;
+      bool assignedChartAlive = (assignedChartId > 0 &&
+                                 MBP_IsChartAlive(assignedChartId) &&
+                                 StringCompare(ChartSymbol(assignedChartId), workerChartSymbol, false) == 0);
 
-      bool assignedChartAlive = (assignedChartId > 0 && MBP_IsChartAlive(assignedChartId));
-      if(assignedChartAlive)
+      long liveChartId = 0;
+      if(slotChartAlive)
+         liveChartId = G_WorkerSlots[i].chartId;
+      else if(assignedChartAlive)
+         liveChartId = assignedChartId;
+
+      bool launchGraceActive = (G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
+                                (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs);
+      bool waitForExistingWorker = (liveChartId > 0 &&
+                                    launchGraceActive &&
+                                    (!hasHeartbeat || workerBooting));
+      if(liveChartId > 0)
       {
-         G_WorkerSlots[i].chartId = assignedChartId;
+         G_WorkerSlots[i].chartId = liveChartId;
+         if(waitForExistingWorker)
+            continue;
+      }
+      else if(launchGraceActive)
+      {
          continue;
       }
 
-      if((nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs)
-         continue;
-
-      long targetChartId = G_WorkerSlots[i].chartId;
-      if(!MBP_IsChartAlive(targetChartId) || StringCompare(ChartSymbol(targetChartId), workerChartSymbol, false) != 0)
-         targetChartId = 0;
-
-      if(targetChartId <= 0)
-         targetChartId = assignedChartId;
-
+      long targetChartId = liveChartId;
       if(targetChartId <= 0)
          targetChartId = MBP_FindReusableChartBySymbol(workerChartSymbol, ChartID());
 
@@ -2335,6 +2365,13 @@ void MasterEnsureRuntimeWorkers()
       if(targetChartId <= 0 || targetChartId == ChartID())
       {
          Print(EmojiWarning(), " Worker launch skipped for ", baseSymbol, " because no safe chart target was available.");
+         G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         continue;
+      }
+
+      if(!MBP_WaitForChartTargetReady(targetChartId, workerChartSymbol))
+      {
+         Print(EmojiWarning(), " Worker chart target was not ready for ", baseSymbol, " on chart ", targetChartId, ".");
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
          continue;
       }
@@ -2363,6 +2400,7 @@ void MasterEnsureRuntimeWorkers()
       G_WorkerSlots[i].chartId = targetChartId;
       G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
       Print(EmojiBrain(), " Coordinator launched worker for ", baseSymbol, " on chart ", targetChartId, " (", workerChartSymbol, ").");
+      break;
    }
 }
 
@@ -3667,7 +3705,8 @@ int Master_OnInit()
 
 // 8. Event listening
    // EventSetTimer(1);
-   EventSetMillisecondTimer(50);
+   int timerIntervalMs = IsParallelCoordinatorMode() ? 250 : 125;
+   EventSetMillisecondTimer(timerIntervalMs);
 
 // Force cleanup of old visual lines
    ObjectsDeleteAll(0, "BoxSeg_");
@@ -4376,8 +4415,11 @@ void Master_OnTimer()
       RefreshSystemSnapshot(G_Cache_SystemBlocked, G_Cache_IsTradingTime, G_Cache_IsNewsTime, G_Cache_IsHardBlock, G_Cache_BlockReason);
       TouchMasterAnalysisEngineOnTimer();
       WriteActiveTrades();
-      CheckSlaveConnection();
-      CheckMasterOrphans();
+      if(!coordinatorMode)
+      {
+         CheckSlaveConnection();
+         CheckMasterOrphans();
+      }
       if(!coordinatorMode)
       {
          RefreshIndicatorOverlay(true);
