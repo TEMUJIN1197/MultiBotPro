@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import MetaTrader5 as mt5
 import numpy as np
@@ -42,10 +42,23 @@ DEFAULT_CONFIG = {
     "rss_enabled": True,
     "external_enabled": True,
     "external_sentiment_url": os.getenv("SHADOW_SENTIMENT_URL", ""),
+    "sentiment_threshold": -0.4,
     "sqlite_path": "MultiBotPro_v3.db",
     "write_sqlite": True,
     "shadow_config_prefix": "ShadowConfig",
     "hybrid_sentiment": True,
+    "openai": {
+        "enabled": bool(os.getenv("OPENAI_API_KEY")),
+        "model": os.getenv("OPENAI_MODEL", "gpt-5.5"),
+        "reasoning_effort": os.getenv("OPENAI_REASONING_EFFORT", "low"),
+        "timeout_seconds": int(os.getenv("OPENAI_TIMEOUT_SECONDS", "25")),
+        "max_output_tokens": int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "220")),
+        "api_key_env": os.getenv("OPENAI_API_KEY_ENV", "OPENAI_API_KEY"),
+        "project_env": os.getenv("OPENAI_PROJECT_ENV", "OPENAI_PROJECT"),
+        "organization_env": os.getenv("OPENAI_ORGANIZATION_ENV", "OPENAI_ORG_ID"),
+        "base_url_env": os.getenv("OPENAI_BASE_URL_ENV", "OPENAI_BASE_URL"),
+        "store": False,
+    },
     "param_ranges": {
         "MA1": {"start": 5, "end": 20, "step": 5},
         "MA2": {"start": 25, "end": 60, "step": 10},
@@ -77,6 +90,27 @@ def cfg_get(cfg: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
             return default
         node = node[k]
     return node
+
+
+def to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default
+
+
+def to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 def apply_runtime_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -111,10 +145,33 @@ def apply_runtime_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg["external_enabled"] = bool(
         cfg_get(runtime_cfg, ["sentiment", "external_enabled"], cfg.get("external_enabled", True))
     )
+    cfg["sentiment_threshold"] = to_float(
+        cfg_get(runtime_cfg, ["sentiment", "killswitch_threshold"], cfg.get("sentiment_threshold", -0.4)),
+        cfg.get("sentiment_threshold", -0.4),
+    )
 
     env_name = cfg_get(runtime_cfg, ["sentiment", "external_url_env"], None)
     if env_name:
         cfg["external_sentiment_url"] = os.getenv(env_name, cfg.get("external_sentiment_url", ""))
+
+    openai_cfg = dict(cfg.get("openai", {}))
+    for key in [
+        "enabled",
+        "model",
+        "reasoning_effort",
+        "timeout_seconds",
+        "max_output_tokens",
+        "api_key_env",
+        "project_env",
+        "organization_env",
+        "base_url_env",
+        "store",
+    ]:
+        val = cfg_get(runtime_cfg, ["openai", key], None)
+        if val is not None:
+            openai_cfg[key] = val
+    if openai_cfg:
+        cfg["openai"] = openai_cfg
 
     return cfg
 
@@ -150,6 +207,7 @@ class ShadowMasterV3:
     def __init__(self, cfg: Dict):
         self.cfg = cfg
         self.sia = None
+        self._openai_warning_emitted = False
         if nltk and SentimentIntensityAnalyzer:
             try:
                 nltk.data.find("sentiment/vader_lexicon.zip")
@@ -179,39 +237,178 @@ class ShadowMasterV3:
         df.set_index("time", inplace=True)
         return df
 
-    def fetch_news_sentiment(self, symbol: str) -> bool:
+    def fetch_news_sentiment(
+        self,
+        symbol: str,
+        market_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
         base_curr = symbol[0:3]
         quote_curr = symbol[3:6]
 
-        scores = []
+        scores: List[float] = []
+        ai_report: Dict[str, Any] = {}
         try:
             if self.cfg.get("hybrid_sentiment", True):
+                rss_headlines: List[str] = []
                 if self.cfg.get("rss_enabled", True):
-                    scores.extend(self._rss_scores(base_curr, quote_curr))
+                    rss_headlines = self._rss_headlines(base_curr, quote_curr)
+                    scores.extend(self._score_headlines(rss_headlines))
+                external_scores: List[float] = []
                 if self.cfg.get("external_enabled", True):
-                    scores.extend(self._external_scores(base_curr, quote_curr))
+                    external_scores = self._external_scores(base_curr, quote_curr)
+                    scores.extend(external_scores)
+
+                ai_report = self._openai_sentiment_report(
+                    symbol=symbol,
+                    base_curr=base_curr,
+                    quote_curr=quote_curr,
+                    market_snapshot=market_snapshot or {},
+                    rss_headlines=rss_headlines,
+                    external_scores=external_scores,
+                )
+                if ai_report:
+                    scores.append(to_float(ai_report.get("sentiment_score"), 0.0))
 
             if not scores:
-                return False
+                return False, ai_report
 
             avg = float(np.mean(scores))
+            threshold = to_float(self.cfg.get("sentiment_threshold", -0.4), -0.4)
+            killswitch = avg <= threshold
 
-            if avg <= -0.4:
+            if ai_report and to_bool(ai_report.get("killswitch"), False):
+                killswitch = True
+
+            if killswitch:
                 logging.warning(
                     "NLP KILLSWITCH ACTIVATED for %s (sentiment %.2f)",
                     symbol,
                     avg,
                 )
-                return True
-            return False
+                return True, ai_report
+            return False, ai_report
 
         except Exception as e:
             logging.error("NLP Engine Error: %s", e)
-            return False
+            return False, ai_report
 
-    def _rss_scores(self, base_curr: str, quote_curr: str) -> List[float]:
+    def _openai_settings(self) -> Dict[str, Any]:
+        settings = self.cfg.get("openai", {})
+        return settings if isinstance(settings, dict) else {}
+
+    def _openai_enabled(self) -> bool:
+        return to_bool(self._openai_settings().get("enabled"), False)
+
+    def _openai_api_key(self) -> str:
+        env_name = str(self._openai_settings().get("api_key_env", "OPENAI_API_KEY"))
+        return os.getenv(env_name, "").strip()
+
+    def _extract_response_text(self, payload: Dict[str, Any]) -> str:
+        output_text = payload.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        pieces: List[str] = []
+        for item in payload.get("output", []):
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content", []):
+                if not isinstance(content, dict):
+                    continue
+                if content.get("type") not in {"output_text", "text"}:
+                    continue
+                text_value = content.get("text")
+                if isinstance(text_value, str):
+                    pieces.append(text_value)
+                elif isinstance(text_value, dict):
+                    candidate = text_value.get("value")
+                    if isinstance(candidate, str):
+                        pieces.append(candidate)
+        return "\n".join(piece for piece in pieces if piece).strip()
+
+    def _extract_first_json_object(self, text: str) -> Dict[str, Any]:
+        decoder = json.JSONDecoder()
+        candidate = text.strip()
+        if not candidate:
+            return {}
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+
+        idx = candidate.find("{")
+        while idx >= 0:
+            try:
+                parsed, _ = decoder.raw_decode(candidate[idx:])
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+            idx = candidate.find("{", idx + 1)
+        return {}
+
+    def _summarize_market_snapshot(self, df: pd.DataFrame) -> Dict[str, Any]:
+        if df.empty:
+            return {}
+
+        closes = df["close"]
+        highs = df["high"]
+        lows = df["low"]
+
+        def pct_change(bars: int) -> Optional[float]:
+            if len(closes) <= bars:
+                return None
+            previous = float(closes.iloc[-(bars + 1)])
+            if abs(previous) < 1e-12:
+                return None
+            latest = float(closes.iloc[-1])
+            return round(((latest - previous) / previous) * 100.0, 4)
+
+        atr_value: Optional[float] = None
+        atr_series = ta.atr(highs, lows, closes, length=14)
+        if atr_series is not None:
+            atr_series = atr_series.dropna()
+            if len(atr_series) > 0:
+                atr_value = round(float(atr_series.iloc[-1]), 6)
+
+        log_returns = np.log(closes / closes.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+        intraday_vol = None
+        if len(log_returns) > 1:
+            intraday_vol = round(float(log_returns.tail(min(len(log_returns), 240)).std()), 6)
+
+        day_window = min(len(df), 1440)
+        return {
+            "bars": int(len(df)),
+            "last_close": round(float(closes.iloc[-1]), 6),
+            "high_24h": round(float(highs.tail(day_window).max()), 6),
+            "low_24h": round(float(lows.tail(day_window).min()), 6),
+            "change_1h_pct": pct_change(60),
+            "change_4h_pct": pct_change(240),
+            "change_1d_pct": pct_change(1440),
+            "atr_14": atr_value,
+            "log_return_vol_240": intraday_vol,
+        }
+
+    def _headline_matches_symbol(self, title: str, base_curr: str, quote_curr: str) -> bool:
+        title_upper = title.upper()
+        return (
+            base_curr.upper() in title_upper
+            or quote_curr.upper() in title_upper
+            or "CRYPTO" in title_upper
+            or "BITCOIN" in title_upper
+        )
+
+    def _score_headlines(self, headlines: List[str]) -> List[float]:
         if not self.sia:
             return []
+        scores: List[float] = []
+        for headline in headlines:
+            if headline:
+                scores.append(self.sia.polarity_scores(headline)["compound"])
+        return scores
+
+    def _rss_headlines(self, base_curr: str, quote_curr: str) -> List[str]:
         url = self.cfg.get("rss_url", "")
         if not url:
             return []
@@ -219,17 +416,22 @@ class ShadowMasterV3:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             xml_data = urllib.request.urlopen(req, timeout=10).read()
             root = ET.fromstring(xml_data)
-            scores = []
+            headlines: List[str] = []
+            seen = set()
             for item in root.findall("./channel/item"):
                 title_el = item.find("title")
-                title = title_el.text if title_el is not None else ""
-                if not title:
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                if not title or title in seen:
                     continue
-                if base_curr in title or quote_curr in title or "Crypto" in title or "Bitcoin" in title:
-                    scores.append(self.sia.polarity_scores(title)["compound"])
-            return scores
+                if self._headline_matches_symbol(title, base_curr, quote_curr):
+                    seen.add(title)
+                    headlines.append(title)
+            return headlines[:8]
         except Exception:
             return []
+
+    def _rss_scores(self, base_curr: str, quote_curr: str) -> List[float]:
+        return self._score_headlines(self._rss_headlines(base_curr, quote_curr))
 
     def _external_scores(self, base_curr: str, quote_curr: str) -> List[float]:
         url = self.cfg.get("external_sentiment_url", "")
@@ -247,6 +449,105 @@ class ShadowMasterV3:
         except Exception:
             return []
         return []
+
+    def _openai_sentiment_report(
+        self,
+        symbol: str,
+        base_curr: str,
+        quote_curr: str,
+        market_snapshot: Dict[str, Any],
+        rss_headlines: List[str],
+        external_scores: List[float],
+    ) -> Dict[str, Any]:
+        if not self._openai_enabled():
+            return {}
+
+        api_key = self._openai_api_key()
+        if not api_key:
+            if not self._openai_warning_emitted:
+                logging.warning(
+                    "OpenAI integration is enabled but %s is not set. Falling back to local sentiment providers.",
+                    self._openai_settings().get("api_key_env", "OPENAI_API_KEY"),
+                )
+                self._openai_warning_emitted = True
+            return {}
+
+        settings = self._openai_settings()
+        model = str(settings.get("model", "gpt-5.5")).strip() or "gpt-5.5"
+        reasoning_effort = str(settings.get("reasoning_effort", "low")).strip() or "low"
+        timeout_seconds = max(5, int(to_float(settings.get("timeout_seconds", 25), 25)))
+        max_output_tokens = max(120, int(to_float(settings.get("max_output_tokens", 220), 220)))
+        base_url_env = str(settings.get("base_url_env", "OPENAI_BASE_URL"))
+        base_url = os.getenv(base_url_env, "https://api.openai.com/v1").strip().rstrip("/")
+        endpoint = base_url if base_url.endswith("/responses") else f"{base_url}/responses"
+
+        prompt_payload = {
+            "task": "Assess short-horizon adverse-news and sentiment risk for the trading symbol.",
+            "symbol": symbol,
+            "base_currency": base_curr,
+            "quote_currency": quote_curr,
+            "market_snapshot": market_snapshot,
+            "rss_headlines": rss_headlines[:8],
+            "external_sentiment_scores": [round(float(x), 4) for x in external_scores[:12]],
+            "timestamp_utc": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+        }
+
+        request_payload: Dict[str, Any] = {
+            "model": model,
+            "input": json.dumps(prompt_payload, ensure_ascii=False),
+            "instructions": (
+                "You are a risk analyst for an automated MetaTrader strategy. "
+                "Return only a compact JSON object with keys "
+                "sentiment_score, killswitch, confidence, risk_bias, summary. "
+                "sentiment_score must be between -1 and 1. confidence must be between 0 and 1. "
+                "risk_bias must be one of bullish, bearish, neutral, mixed. "
+                "Use neutral sentiment when evidence is weak or sparse."
+            ),
+            "max_output_tokens": max_output_tokens,
+            "store": to_bool(settings.get("store"), False),
+        }
+        if reasoning_effort:
+            request_payload["reasoning"] = {"effort": reasoning_effort}
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        project_env = str(settings.get("project_env", "OPENAI_PROJECT"))
+        project_name = os.getenv(project_env, "").strip()
+        if project_name:
+            headers["OpenAI-Project"] = project_name
+
+        org_env = str(settings.get("organization_env", "OPENAI_ORG_ID"))
+        organization = os.getenv(org_env, "").strip()
+        if organization:
+            headers["OpenAI-Organization"] = organization
+
+        try:
+            body = json.dumps(request_payload).encode("utf-8")
+            req = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+            raw = urllib.request.urlopen(req, timeout=timeout_seconds).read().decode("utf-8")
+            response_payload = json.loads(raw)
+            text = self._extract_response_text(response_payload)
+            parsed = self._extract_first_json_object(text)
+            if not parsed:
+                logging.warning("OpenAI response for %s did not contain parseable JSON.", symbol)
+                return {}
+
+            summary = str(parsed.get("summary", "")).strip()
+            return {
+                "provider": "openai_responses",
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+                "sentiment_score": max(-1.0, min(1.0, to_float(parsed.get("sentiment_score"), 0.0))),
+                "killswitch": to_bool(parsed.get("killswitch"), False),
+                "confidence": max(0.0, min(1.0, to_float(parsed.get("confidence"), 0.0))),
+                "risk_bias": str(parsed.get("risk_bias", "neutral")).strip().lower() or "neutral",
+                "summary": summary[:180],
+            }
+        except Exception as exc:
+            logging.warning("OpenAI sentiment call failed for %s: %s", symbol, exc)
+            return {}
 
     def precompute_indicators(self, df: pd.DataFrame, params: Dict) -> Dict[str, Dict[float, pd.Series]]:
         cache = {"ema": {}, "adx": {}, "box": {}}
@@ -304,7 +605,8 @@ class ShadowMasterV3:
 
         params = self.cfg["param_ranges"]
         cache = self.precompute_indicators(df, params)
-        nlp_killswitch = self.fetch_news_sentiment(symbol)
+        market_snapshot = self._summarize_market_snapshot(df)
+        nlp_killswitch, ai_report = self.fetch_news_sentiment(symbol, market_snapshot)
 
         best_score = -9999.0
         best: Dict[str, Any] = {}
@@ -379,6 +681,16 @@ class ShadowMasterV3:
                                             "run_id": int(time.time()),
                                             "Updated": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                                         }
+
+        if best and ai_report:
+            best["AI_Provider"] = str(ai_report.get("provider", ""))
+            best["AI_Model"] = str(ai_report.get("model", ""))
+            best["AI_ReasoningEffort"] = str(ai_report.get("reasoning_effort", ""))
+            best["AI_SentimentScore"] = round(to_float(ai_report.get("sentiment_score"), 0.0), 4)
+            best["AI_Confidence"] = round(to_float(ai_report.get("confidence"), 0.0), 4)
+            best["AI_RiskBias"] = str(ai_report.get("risk_bias", "neutral"))
+            best["AI_Killswitch"] = to_bool(ai_report.get("killswitch"), False)
+            best["AI_Summary"] = str(ai_report.get("summary", ""))[:180]
 
         sys.stdout.write("\r" + " " * 100 + "\r")
         logging.info("Best %s: %s", symbol, best)

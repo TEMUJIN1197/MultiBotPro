@@ -315,12 +315,13 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
     {
     }
     
-   string analysisSymbol = baseSymbol;
-   bool usesSyntheticChart = MBP_IsSyntheticDataMode(SymbolData[index].DataMode);
-   if(usesSyntheticChart)
-   {
-      if(!PrepareSymbolStartupChart(index, SymbolData[index].DataMode, analysisSymbol))
-      {
+    string analysisSymbol = baseSymbol;
+    bool usesSyntheticChart = MBP_IsSyntheticDataMode(SymbolData[index].DataMode);
+    bool lightweightCoordinator = IsParallelCoordinatorMode();
+    if(usesSyntheticChart && !lightweightCoordinator)
+    {
+       if(!PrepareSymbolStartupChart(index, SymbolData[index].DataMode, analysisSymbol))
+       {
          Print("Warning: Synthetic chart startup failed for ", baseSymbol,
                " in mode ", MBP_DataModeToText(SymbolData[index].DataMode),
                ". Skipping symbol.");
@@ -329,15 +330,15 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
          SymbolData[index].symbol = baseSymbol;
          return false;
       }
-   }
-   SymbolData[index].AnalysisSymbol = analysisSymbol;
-   SymbolData[index].symbol = analysisSymbol; // Final assignment for Analysis tracking
+    }
+    SymbolData[index].AnalysisSymbol = analysisSymbol;
+    SymbolData[index].symbol = analysisSymbol; // Final assignment for Analysis tracking
 
 // 2. Initialize MA handles for each timeframe
-   for(int tf = 0; tf < 7; tf++)
-     {
-      if(TimeframeEnabled[tf])
-        {
+    for(int tf = 0; tf < 7; tf++)
+      {
+       if(!lightweightCoordinator && TimeframeEnabled[tf])
+         {
          // Safely resolve the active periods (Use AI if valid, else use Inputs, else hard-fallback to 14/21)
          int activeMA1 = GetActiveMAPeriod(index, 0);
          int activeMA2 = GetActiveMAPeriod(index, 1);
@@ -369,43 +370,52 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
      }
 
    // Initialize ATR handle
-   ENUM_TIMEFRAMES atrTF = ATR_Timeframe;
-   if(atrTF == PERIOD_CURRENT && baseSymbol != _Symbol)
-      {
-      if(Period() > PERIOD_MN1 || (int)Period() == 2 || (int)Period() == 3 || (int)Period() == 4 || (int)Period() == 6)
-        {
-         Print("Warning: ATR_Timeframe=CURRENT is invalid for secondary symbol ", baseSymbol, " on this custom chart. Falling back to M1.");
-         atrTF = PERIOD_M1; 
-        }
-     }
-   
-   SymbolData[index].ATR_Handle = iATR(analysisSymbol, atrTF, ATR_Period);
-   if(SymbolData[index].ATR_Handle == INVALID_HANDLE)
-      Print("Error: Failed to create ATR Handle for ", analysisSymbol, " on TF: ", EnumToString(atrTF));
+    if(!lightweightCoordinator)
+    {
+       ENUM_TIMEFRAMES atrTF = ATR_Timeframe;
+       if(atrTF == PERIOD_CURRENT && baseSymbol != _Symbol)
+       {
+          if(Period() > PERIOD_MN1 || (int)Period() == 2 || (int)Period() == 3 || (int)Period() == 4 || (int)Period() == 6)
+          {
+             Print("Warning: ATR_Timeframe=CURRENT is invalid for secondary symbol ", baseSymbol, " on this custom chart. Falling back to M1.");
+             atrTF = PERIOD_M1; 
+          }
+       }
+    
+       SymbolData[index].ATR_Handle = iATR(analysisSymbol, atrTF, ATR_Period);
+       if(SymbolData[index].ATR_Handle == INVALID_HANDLE)
+          Print("Error: Failed to create ATR Handle for ", analysisSymbol, " on TF: ", EnumToString(atrTF));
 
-   // --- NEW ADX INITIALIZATION ---
-   if(UseADX)
-     {
-      // Safe Fallback for ADX
-      int activeADX = (SymbolData[index].Dyn_ADX_Period > 0) ? SymbolData[index].Dyn_ADX_Period : ((G_ADX_Period > 0) ? G_ADX_Period : 14);
-      SymbolData[index].ADX_Handle = iADX(analysisSymbol, PERIOD_CURRENT, activeADX);
-      if(SymbolData[index].ADX_Handle == INVALID_HANDLE)
-         Print("Warning: Failed to create ADX handle for ", analysisSymbol);
-     }
-   else
-     {
-      SymbolData[index].ADX_Handle = INVALID_HANDLE;
-     }
+       // --- NEW ADX INITIALIZATION ---
+       if(UseADX)
+       {
+          // Safe Fallback for ADX
+          int activeADX = (SymbolData[index].Dyn_ADX_Period > 0) ? SymbolData[index].Dyn_ADX_Period : ((G_ADX_Period > 0) ? G_ADX_Period : 14);
+          SymbolData[index].ADX_Handle = iADX(analysisSymbol, PERIOD_CURRENT, activeADX);
+          if(SymbolData[index].ADX_Handle == INVALID_HANDLE)
+             Print("Warning: Failed to create ADX handle for ", analysisSymbol);
+       }
+       else
+       {
+          SymbolData[index].ADX_Handle = INVALID_HANDLE;
+       }
 
-// Initialize MA stop loss handle
-   if(StopLossType == SL_MA)
-     {
-      SymbolData[index].MA_SL_Handle = iMA(analysisSymbol, PERIOD_CURRENT, MA_SL_Period, 0, GetMAMethod(MA_SL_Method), GetMASource(MA_SL_Source));
-     }
-   else
-     {
-      SymbolData[index].MA_SL_Handle = INVALID_HANDLE;
-     }
+       // Initialize MA stop loss handle
+       if(StopLossType == SL_MA)
+       {
+          SymbolData[index].MA_SL_Handle = iMA(analysisSymbol, PERIOD_CURRENT, MA_SL_Period, 0, GetMAMethod(MA_SL_Method), GetMASource(MA_SL_Source));
+       }
+       else
+       {
+          SymbolData[index].MA_SL_Handle = INVALID_HANDLE;
+       }
+    }
+    else
+    {
+       SymbolData[index].ATR_Handle = INVALID_HANDLE;
+       SymbolData[index].ADX_Handle = INVALID_HANDLE;
+       SymbolData[index].MA_SL_Handle = INVALID_HANDLE;
+    }
 
 // Initialize VWAP data
    SymbolData[index].VWAP1.Value = 0;
@@ -422,7 +432,8 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
    SymbolData[index].VWAP3 = SymbolData[index].VWAP1;
    
    // --- FIX: Force State Backfill Immediately ---
-   BackfillVWAPState(index); 
+    if(!lightweightCoordinator)
+       BackfillVWAPState(index); 
    // --------------------------------------------
 
 // Initialize arrays and variables
@@ -533,20 +544,29 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
    SymbolData[index].GridSequenceDepth = 0;
 
 // --- FIX: POPULATE BOX DATA IMMEDIATELY ---
-   bool restoredBoxHistory = false;
-   if(G_FastChartSwitchMode)
-      restoredBoxHistory = LoadBoxHistoryCacheForSymbol(analysisSymbol, index);
+    bool restoredBoxHistory = false;
+    if(!lightweightCoordinator)
+    {
+       if(G_FastChartSwitchMode)
+          restoredBoxHistory = LoadBoxHistoryCacheForSymbol(analysisSymbol, index);
 
-   if(restoredBoxHistory)
-     {
-      SymbolData[index].BoxHistoryWarmupQueued = false;
-      SymbolData[index].BoxHistoryWarmupDone = true;
-      SymbolData[index].BoxHistoryWarmupNextAttemptMs = 0;
-     }
-   else
-     {
-      QueueBoxHistoryWarmup(index, 0);
-     }
+       if(restoredBoxHistory)
+       {
+          SymbolData[index].BoxHistoryWarmupQueued = false;
+          SymbolData[index].BoxHistoryWarmupDone = true;
+          SymbolData[index].BoxHistoryWarmupNextAttemptMs = 0;
+       }
+       else
+       {
+          QueueBoxHistoryWarmup(index, 0);
+       }
+    }
+    else
+    {
+       SymbolData[index].BoxHistoryWarmupQueued = false;
+       SymbolData[index].BoxHistoryWarmupDone = true;
+       SymbolData[index].BoxHistoryWarmupNextAttemptMs = 0;
+    }
 // ------------------------------------------
 
 // Initialize Grid TP Tracking
@@ -563,7 +583,8 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
 // [Inside InitializeSymbolData]
    SymbolData[index].RecoveryIteration = 1;
 
-   InitFilterTracker(index);
+    if(!lightweightCoordinator)
+       InitFilterTracker(index);
    
    return true;
   }

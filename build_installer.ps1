@@ -189,6 +189,7 @@ Copy-RequiredFile -Source (Join-Path $ProjectRoot "romeo_panel.bmp") -Destinatio
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "romeo.ico") -DestinationDirectory $StageExpertsRoot
 Copy-OptionalFile -Source (Join-Path $ProjectRoot "accel.bmp") -DestinationDirectory $StageExpertsRoot
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "runtime_v3.json") -DestinationDirectory $StageExpertsRoot
+Copy-OptionalFile -Source (Join-Path $ProjectRoot "runtime_v3.openai.sample.json") -DestinationDirectory $StageExpertsRoot
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "sqlite_schema.sql") -DestinationDirectory $StageExpertsRoot
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "accel.dll") -DestinationDirectory $StageLibrariesRoot
 

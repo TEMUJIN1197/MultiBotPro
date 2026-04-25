@@ -50,6 +50,7 @@ private:
    datetime m_lastPublishedLiveBarTime;
    ulong    m_lastDirectPreviewPublishUs;
    long     m_lastLiveTickMsc;
+   long     m_lastLiveQuoteTickMsc;
    long     m_lastCommittedQuoteTickMsc;
    bool     m_tickMirroringEnabled;
    bool     m_tickMirrorWarningLogged;
@@ -153,6 +154,7 @@ private:
    void PublishLivePreviewRate();
    void DeletePublishedLivePreviewRate(const datetime barTime = 0);
    void UpdateCustomQuoteFields(const double bid, const double ask);
+   void PublishLiveQuoteTick(const double bid, const double ask, long requestedTimeMsc);
    void PublishCommittedQuote(const double closePrice, const long eventTimeMsc);
    void DrawLivePreviewOverlay();
    void DrawLivePreviewOverlayOnChart(const long chartId);
@@ -220,6 +222,7 @@ CRenkoEngine::CRenkoEngine() :
    m_lastPublishedLiveBarTime(0),
    m_lastDirectPreviewPublishUs(0),
    m_lastLiveTickMsc(0),
+   m_lastLiveQuoteTickMsc(0),
    m_lastCommittedQuoteTickMsc(0),
    m_tickMirroringEnabled(true),
    m_tickMirrorWarningLogged(false),
@@ -448,6 +451,13 @@ void CRenkoEngine::ProcessTimer(const MqlTick &tick, const bool hasLiveTick)
          if(livePrice > 0.0)
             m_lastLivePrice = NormalizePrice(livePrice);
       }
+
+      if(UseLargeDirectLiveMode())
+      {
+         double livePrice = (tick.bid > 0.0) ? tick.bid : tick.last;
+         if(livePrice > 0.0)
+            UpdateLiveBlock(livePrice, tick.time, tick.time_msc, m_lastSourceBid, m_lastSourceAsk, false);
+      }
    }
 
    RefreshBlockSize(TimeCurrent(), false);
@@ -559,6 +569,7 @@ void CRenkoEngine::ResetRuntimeState()
    m_livePreviewEndTime = 0;
    m_lastPublishedLiveBarTime = 0;
    m_lastLiveTickMsc = 0;
+   m_lastLiveQuoteTickMsc = 0;
    m_lastCommittedQuoteTickMsc = 0;
    m_tickMirroringEnabled = true;
    m_tickMirrorWarningLogged = false;
@@ -1228,36 +1239,19 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
    if(UseLargeDirectLiveMode())
    {
       DeleteLivePreviewOverlay();
-      if(!ShouldPublishDirectPreview(forcePublish))
-         return;
-
-      DeletePublishedLivePreviewRate();
-      if(m_lastCommittedTime > 0)
-      {
-         CustomRatesDelete(m_customSymbol, m_lastCommittedTime + 1, LONG_MAX);
-         CustomTicksDelete(m_customSymbol, ((long)m_lastCommittedTime + 1) * 1000, LONG_MAX);
-      }
-
       double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
       if(point <= 0.0)
          point = _Point;
       double bid = (sourceBid > 0.0) ? NormalizePrice(sourceBid) : m_lastLivePrice;
       double ask = (sourceAsk > bid) ? NormalizePrice(sourceAsk) : NormalizePrice(bid + point);
       UpdateCustomQuoteFields(bid, ask);
-      PublishLivePreviewRate();
+      PublishLiveQuoteTick(bid, ask, candidateTickMsc);
 
-      long liveTickMsc = ReserveLiveQuoteTickTimeMsc(candidateTickMsc);
-      if(liveTickMsc > 0)
-      {
-         MqlTick liveTick[1];
-         liveTick[0].time = (datetime)(liveTickMsc / 1000);
-         liveTick[0].time_msc = liveTickMsc;
-         liveTick[0].bid = bid;
-         liveTick[0].ask = ask;
-         liveTick[0].flags = TICK_FLAG_BID | TICK_FLAG_ASK;
-         ResetLastError();
-         CustomTicksAdd(m_customSymbol, liveTick, 1);
-      }
+      if(!ShouldPublishDirectPreview(forcePublish))
+         return;
+
+      DeletePublishedLivePreviewRate();
+      PublishLivePreviewRate();
       return;
    }
 
@@ -1344,6 +1338,62 @@ void CRenkoEngine::UpdateCustomQuoteFields(const double bid, const double ask)
    CustomSymbolSetDouble(m_customSymbol, SYMBOL_BID, NormalizePrice(bid));
    CustomSymbolSetDouble(m_customSymbol, SYMBOL_ASK, NormalizePrice(ask));
    CustomSymbolSetDouble(m_customSymbol, SYMBOL_LAST, NormalizePrice(bid));
+}
+
+void CRenkoEngine::PublishLiveQuoteTick(const double bid, const double ask, long requestedTimeMsc)
+{
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+
+   ulong nowMs = GetTickCount();
+   if(!m_tickMirroringEnabled)
+   {
+      if(m_tickMirrorRetryAfterMs == 0 || nowMs < m_tickMirrorRetryAfterMs)
+         return;
+
+      m_tickMirroringEnabled = true;
+      m_tickMirrorFailureCount = 0;
+   }
+
+   if(requestedTimeMsc <= 0)
+      requestedTimeMsc = (m_lastLiveTickMsc > 0) ? m_lastLiveTickMsc : ((long)TimeCurrent() * 1000);
+   if(m_lastLiveQuoteTickMsc > 0 && requestedTimeMsc <= m_lastLiveQuoteTickMsc)
+      requestedTimeMsc = m_lastLiveQuoteTickMsc + 1;
+   if(m_lastCommittedQuoteTickMsc > 0 && requestedTimeMsc <= m_lastCommittedQuoteTickMsc)
+      requestedTimeMsc = m_lastCommittedQuoteTickMsc + 1;
+
+   long liveTickMsc = ReserveLiveQuoteTickTimeMsc(requestedTimeMsc);
+   if(liveTickMsc <= 0)
+      return;
+
+   MqlTick liveTick[1];
+   liveTick[0].time = (datetime)(liveTickMsc / 1000);
+   liveTick[0].time_msc = liveTickMsc;
+   liveTick[0].bid = NormalizePrice(bid);
+   liveTick[0].ask = NormalizePrice(ask);
+   liveTick[0].last = NormalizePrice(bid);
+   liveTick[0].volume = 0;
+   liveTick[0].volume_real = 0.0;
+   liveTick[0].flags = TICK_FLAG_BID | TICK_FLAG_ASK | TICK_FLAG_LAST;
+
+   ResetLastError();
+   if(!CustomTicksAdd(m_customSymbol, liveTick, 1))
+   {
+      int err = _LastError;
+      if(err != 0)
+      {
+         m_tickMirrorFailureCount++;
+         if(m_tickMirrorFailureCount >= 10)
+         {
+            m_tickMirrorRetryAfterMs = nowMs + 60000;
+            DisableTickMirroring("live quote publish", err);
+         }
+      }
+      return;
+   }
+
+   m_tickMirrorFailureCount = 0;
+   m_lastLiveQuoteTickMsc = liveTickMsc;
 }
 
 void CRenkoEngine::PublishCommittedQuote(const double closePrice, const long eventTimeMsc)
@@ -1983,6 +2033,9 @@ int CRenkoEngine::FeedWorkerTicksBatch(const MqlTick &ticks[], const int startIn
    double prices[];
    long times[];
    int valid = 0;
+   double lastMirrorBid = 0.0;
+   double lastMirrorAsk = 0.0;
+   long lastMirrorTimeMsc = 0;
    ArrayResize(prices, actualCount);
    ArrayResize(times, actualCount);
    for(int i = 0; i < actualCount; i++)
@@ -1997,6 +2050,9 @@ int CRenkoEngine::FeedWorkerTicksBatch(const MqlTick &ticks[], const int startIn
 
       prices[valid] = tick.bid;
       times[valid] = tickMsc;
+      lastMirrorBid = tick.bid;
+      lastMirrorAsk = tick.ask;
+      lastMirrorTimeMsc = tickMsc;
       valid++;
    }
 
@@ -2010,6 +2066,16 @@ int CRenkoEngine::FeedWorkerTicksBatch(const MqlTick &ticks[], const int startIn
    {
       DisableWorkerSession("feed tick batch failed");
       return 0;
+   }
+
+   if(UseLargeDirectLiveMode() && lastMirrorBid > 0.0)
+   {
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      if(point <= 0.0)
+         point = _Point;
+      double liveAsk = (lastMirrorAsk > lastMirrorBid) ? lastMirrorAsk : (lastMirrorBid + point);
+      UpdateCustomQuoteFields(lastMirrorBid, liveAsk);
+      PublishLiveQuoteTick(lastMirrorBid, liveAsk, lastMirrorTimeMsc);
    }
 
    int closed = 0;
@@ -2112,6 +2178,7 @@ bool CRenkoEngine::LoadState()
                           : -1;
    m_livePreviewEndTime = m_liveLogicalStartTime;
    m_lastLiveTickMsc = 0;
+   m_lastLiveQuoteTickMsc = 0;
    m_lastLivePrice = (m_lastClosePrice > 0.0) ? m_lastClosePrice : m_anchorPrice;
    return true;
 }

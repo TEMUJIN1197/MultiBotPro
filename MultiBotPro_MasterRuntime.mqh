@@ -505,6 +505,9 @@ int MBP_RuntimeTickBatchLimit()
 
 int MBP_ProcessSyntheticTickBatch(const int symbolIndex, const MqlTick &ticks[])
 {
+   if(IsParallelCoordinatorMode())
+      return 0;
+
    if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
       return 0;
    if(CheckPointer(SymbolData[symbolIndex].ChartFactories) == POINTER_INVALID)
@@ -566,6 +569,9 @@ int MBP_ProcessSyntheticTickBatch(const int symbolIndex, const MqlTick &ticks[])
 
 void MasterServiceSyntheticSymbol(const int symbolIndex, const bool withHeartbeat)
 {
+   if(IsParallelCoordinatorMode())
+      return;
+
    if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
       return;
    if(!SymbolData[symbolIndex].active)
@@ -666,6 +672,9 @@ void ShutdownMasterAnalysisEngine()
 //+------------------------------------------------------------------+
 void MasterPumpRuntimeServices()
 {
+   if(IsParallelCoordinatorMode())
+      return;
+
    int total = ArraySize(SymbolData);
    if(total <= 0)
       return;
@@ -684,6 +693,12 @@ void MasterPumpRuntimeServices()
 //+------------------------------------------------------------------+
 void MasterPumpTimerServices()
 {
+   if(IsParallelCoordinatorMode())
+   {
+      MaintainMasterHostChartVisibility();
+      return;
+   }
+
    int total = ArraySize(SymbolData);
    if(total > 0)
    {
