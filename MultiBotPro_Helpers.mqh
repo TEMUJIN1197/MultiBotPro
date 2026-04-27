@@ -1266,9 +1266,9 @@ void BuildSymbolList()
          string workerSymbol = G_RuntimeAssignedWorkerSymbol;
          if(workerSymbol == "")
             workerSymbol = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
-         if(workerSymbol == "")
+         if(workerSymbol == "" && G_RuntimeAssignedSlotId < 0)
             workerSymbol = GetBaseSymbol(_Symbol);
-         if(workerSymbol == "")
+         if(workerSymbol == "" && G_RuntimeAssignedSlotId < 0)
             workerSymbol = _Symbol;
 
          if(workerSymbol != "")

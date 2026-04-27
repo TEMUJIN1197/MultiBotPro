@@ -16,6 +16,472 @@ struct SBridgeChannelLock
    datetime expiresAt;
 };
 
+string MBP_BasketRuntimeLegacyStateFileName(const int symbolIndex)
+{
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return "";
+
+   string baseSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(baseSymbol == "")
+      baseSymbol = SymbolData[symbolIndex].symbol;
+   if(baseSymbol == "")
+      baseSymbol = _Symbol;
+
+   return StringFormat("MBP_BasketState_%s_%d_%s_B%d.txt",
+                       MBP_SanitizeRuntimeToken(MBP_GetActiveCoordinatorKey()),
+                       MagicNumber,
+                       MBP_SanitizeRuntimeToken(baseSymbol),
+                       SymbolData[symbolIndex].BasketId);
+}
+
+string MBP_BasketRuntimeStateFileName(const int symbolIndex)
+{
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return "";
+
+   string baseSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(baseSymbol == "")
+      baseSymbol = SymbolData[symbolIndex].symbol;
+   if(baseSymbol == "")
+      baseSymbol = _Symbol;
+
+   string coordinatorKey = MBP_GetActiveCoordinatorKey();
+   string slotScope = "COORD";
+   if(IsParallelWorkerMode() && G_RuntimeAssignedSlotId >= 0)
+      slotScope = "S" + IntegerToString(G_RuntimeAssignedSlotId);
+   else if(IsParallelLegacyMode())
+      slotScope = "LEGACY";
+
+   return StringFormat("MBP_BasketState_%s_%s_%s_%d_%s_B%d.txt",
+                       MBP_SanitizeRuntimeToken(InpHedgeChannel),
+                       MBP_SanitizeRuntimeToken(coordinatorKey),
+                       MBP_SanitizeRuntimeToken(slotScope),
+                       MagicNumber,
+                       MBP_SanitizeRuntimeToken(baseSymbol),
+                       SymbolData[symbolIndex].BasketId);
+}
+
+string MBP_StateReadKeyValue(const string payload, const string key, const string fallback = "")
+{
+   string needle = key + "=";
+   int start = StringFind(payload, needle);
+   if(start < 0)
+      return fallback;
+
+   start += StringLen(needle);
+   int end = StringFind(payload, "\n", start);
+   if(end < 0)
+      end = StringLen(payload);
+
+   string value = StringSubstr(payload, start, end - start);
+   StringReplace(value, "\r", "");
+   return value;
+}
+
+double MBP_StateReadDouble(const string payload, const string key, const double fallback = 0.0)
+{
+   string value = MBP_StateReadKeyValue(payload, key, "");
+   if(value == "")
+      return fallback;
+   return StringToDouble(value);
+}
+
+int MBP_StateReadInteger(const string payload, const string key, const int fallback = 0)
+{
+   string value = MBP_StateReadKeyValue(payload, key, "");
+   if(value == "")
+      return fallback;
+   return (int)StringToInteger(value);
+}
+
+bool MBP_StateReadBool(const string payload, const string key, const bool fallback = false)
+{
+   string value = MBP_StateReadKeyValue(payload, key, "");
+   if(value == "")
+      return fallback;
+   return (StringToInteger(value) != 0);
+}
+
+bool MBP_IsBasketRuntimePosition(const int symbolIndex, const string positionSymbol, const string comment)
+{
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return false;
+
+   string trackingSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(trackingSymbol == "")
+      trackingSymbol = SymbolData[symbolIndex].symbol;
+
+   if(StringCompare(positionSymbol, trackingSymbol, false) != 0)
+      return false;
+   if(InpEnableMultiBaskets && !IsPositionInBasket(symbolIndex, comment))
+      return false;
+
+   return (StringFind(comment, "Grid") >= 0 ||
+           StringFind(comment, "Zone") >= 0 ||
+           StringFind(comment, "Stack") >= 0);
+}
+
+bool BasketRuntimeHasLivePositions(const int symbolIndex)
+{
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(!IsAppTrade(PositionGetInteger(POSITION_MAGIC)))
+         continue;
+
+      if(MBP_IsBasketRuntimePosition(symbolIndex,
+                                     PositionGetString(POSITION_SYMBOL),
+                                     PositionGetString(POSITION_COMMENT)))
+         return true;
+   }
+
+   return false;
+}
+
+void ClearBasketRuntimeState(const int symbolIndex)
+{
+   string stateFile = MBP_BasketRuntimeStateFileName(symbolIndex);
+   if(stateFile != "" && FileIsExist(stateFile, FILE_COMMON))
+      FileDelete(stateFile, FILE_COMMON);
+}
+
+bool SaveBasketRuntimeState(const int symbolIndex)
+{
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return false;
+   if(!SymbolData[symbolIndex].active)
+      return false;
+   if(RiskMode != RISK_MODE_GRID && RiskMode != RISK_MODE_ZONE_RECOVERY)
+   {
+      ClearBasketRuntimeState(symbolIndex);
+      return true;
+   }
+   if(!BasketRuntimeHasLivePositions(symbolIndex))
+   {
+      ClearBasketRuntimeState(symbolIndex);
+      return true;
+   }
+
+   string stateFile = MBP_BasketRuntimeStateFileName(symbolIndex);
+   if(stateFile == "")
+      return false;
+
+   int handle = FileOpen(stateFile, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   if(handle == INVALID_HANDLE)
+   {
+      Print(EmojiWarning(), " Failed to save basket runtime state for ", SymbolData[symbolIndex].symbol,
+            ". Error=", GetLastError());
+      return false;
+   }
+
+   FileWriteString(handle, "version=1\r\n");
+   FileWriteString(handle, "updated_at=" + IntegerToString((int)TimeCurrent()) + "\r\n");
+   FileWriteString(handle, "risk_mode=" + IntegerToString((int)RiskMode) + "\r\n");
+   FileWriteString(handle, "basket_id=" + IntegerToString(SymbolData[symbolIndex].BasketId) + "\r\n");
+   FileWriteString(handle, "last_grid_reset=" + IntegerToString((int)SymbolData[symbolIndex].LastGridReset) + "\r\n");
+   FileWriteString(handle, "basket_active=" + IntegerToString(SymbolData[symbolIndex].BasketActive ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "basket_initial_entry=" + DoubleToString(SymbolData[symbolIndex].BasketInitialEntry, 16) + "\r\n");
+   FileWriteString(handle, "basket_direction=" + IntegerToString((int)SymbolData[symbolIndex].BasketDirection) + "\r\n");
+   FileWriteString(handle, "grid_levels=" + IntegerToString(SymbolData[symbolIndex].GridLevels) + "\r\n");
+   FileWriteString(handle, "grid_phase1=" + IntegerToString(SymbolData[symbolIndex].GridPhase1Active ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "grid_phase2=" + IntegerToString(SymbolData[symbolIndex].GridPhase2Active ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "grid_target_reached=" + IntegerToString(SymbolData[symbolIndex].GridTargetReached ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "grid_in_trailing=" + IntegerToString(SymbolData[symbolIndex].GridInTrailing ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "grid_in_stacking=" + IntegerToString(SymbolData[symbolIndex].GridInStacking ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "grid_basket_sl=" + DoubleToString(SymbolData[symbolIndex].GridBasketStopLoss, 16) + "\r\n");
+   FileWriteString(handle, "grid_basket_tp=" + DoubleToString(SymbolData[symbolIndex].GridBasketTakeProfit, 16) + "\r\n");
+   FileWriteString(handle, "grid_basket_entry=" + DoubleToString(SymbolData[symbolIndex].GridBasketEntry, 16) + "\r\n");
+   FileWriteString(handle, "grid_basket_volume=" + DoubleToString(SymbolData[symbolIndex].GridBasketVolume, 16) + "\r\n");
+   FileWriteString(handle, "grid_target_profit=" + DoubleToString(SymbolData[symbolIndex].GridTargetProfit, 16) + "\r\n");
+   FileWriteString(handle, "raw_next_grid_lot=" + DoubleToString(SymbolData[symbolIndex].RawNextGridLot, 16) + "\r\n");
+   FileWriteString(handle, "last_used_grid_raw_lot=" + DoubleToString(SymbolData[symbolIndex].LastUsedGridRawLot, 16) + "\r\n");
+   FileWriteString(handle, "raw_next_stack_lot=" + DoubleToString(SymbolData[symbolIndex].RawNextStackLot, 16) + "\r\n");
+   FileWriteString(handle, "last_used_stack_raw_lot=" + DoubleToString(SymbolData[symbolIndex].LastUsedStackRawLot, 16) + "\r\n");
+   FileWriteString(handle, "grid_tp_hit=" + IntegerToString(SymbolData[symbolIndex].GridTPHit ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "grid_tp_hit_price=" + DoubleToString(SymbolData[symbolIndex].GridTPHitPrice, 16) + "\r\n");
+   FileWriteString(handle, "grid_sequence_depth=" + IntegerToString(SymbolData[symbolIndex].GridSequenceDepth) + "\r\n");
+   FileWriteString(handle, "zone_active=" + IntegerToString(SymbolData[symbolIndex].ZoneActive ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "zone_top=" + DoubleToString(SymbolData[symbolIndex].ZoneTopPrice, 16) + "\r\n");
+   FileWriteString(handle, "zone_bottom=" + DoubleToString(SymbolData[symbolIndex].ZoneBottomPrice, 16) + "\r\n");
+   FileWriteString(handle, "zone_seq_count=" + IntegerToString(SymbolData[symbolIndex].ZoneSeqCount) + "\r\n");
+   FileWriteString(handle, "zone_resolved=" + IntegerToString(SymbolData[symbolIndex].ZoneResolved ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "current_recovery_portion=" + DoubleToString(SymbolData[symbolIndex].CurrentRecoveryPortion, 16) + "\r\n");
+   FileWriteString(handle, "pruning_occurred=" + IntegerToString(SymbolData[symbolIndex].PruningOccurredThisSequence ? 1 : 0) + "\r\n");
+   FileWriteString(handle, "recovery_iteration=" + IntegerToString((int)MathMax(1, SymbolData[symbolIndex].RecoveryIteration)) + "\r\n");
+   FileClose(handle);
+
+   return true;
+}
+
+bool RebuildBasketRuntimeStateFromOpenPositions(const int symbolIndex, const bool persistAfter = true)
+{
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return false;
+   if(RiskMode != RISK_MODE_GRID && RiskMode != RISK_MODE_ZONE_RECOVERY)
+      return false;
+
+   string trackingSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(trackingSymbol == "")
+      trackingSymbol = SymbolData[symbolIndex].symbol;
+
+   int liveCount = 0;
+   int logicCount = 0;
+   double totalVolume = 0.0;
+   double totalValue = 0.0;
+   double firstNonZeroSL = 0.0;
+   double firstNonZeroTP = 0.0;
+   double minEntry = 0.0;
+   double maxEntry = 0.0;
+   bool haveEntry = false;
+   datetime oldestTime = 0;
+   double oldestEntry = 0.0;
+   ENUM_POSITION_TYPE oldestType = POSITION_TYPE_BUY;
+
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(!IsAppTrade(PositionGetInteger(POSITION_MAGIC)))
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(!MBP_IsBasketRuntimePosition(symbolIndex, PositionGetString(POSITION_SYMBOL), comment))
+         continue;
+
+      bool isStack = (StringFind(comment, "Stack") >= 0);
+      bool isGrid = (StringFind(comment, "Grid") >= 0);
+      bool isZone = (StringFind(comment, "Zone") >= 0);
+      if(!isGrid && !isZone && !isStack)
+         continue;
+
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+      liveCount++;
+      totalVolume += volume;
+      totalValue += volume * entry;
+      if((isGrid || isZone) && !isStack)
+         logicCount++;
+      if(firstNonZeroSL <= 0.0 && sl > 0.0)
+         firstNonZeroSL = sl;
+      if(firstNonZeroTP <= 0.0 && tp > 0.0)
+         firstNonZeroTP = tp;
+
+      if(!haveEntry)
+      {
+         minEntry = entry;
+         maxEntry = entry;
+         haveEntry = true;
+      }
+      else
+      {
+         if(entry < minEntry)
+            minEntry = entry;
+         if(entry > maxEntry)
+            maxEntry = entry;
+      }
+
+      if(oldestTime == 0 || openTime < oldestTime)
+      {
+         oldestTime = openTime;
+         oldestEntry = entry;
+         oldestType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      }
+   }
+
+   if(liveCount <= 0 || totalVolume <= 0.0)
+   {
+      ClearBasketRuntimeState(symbolIndex);
+      return false;
+   }
+
+   if(logicCount <= 0)
+      logicCount = liveCount;
+
+   SymbolData[symbolIndex].BasketActive = true;
+   if(SymbolData[symbolIndex].BasketInitialEntry <= 0.0)
+      SymbolData[symbolIndex].BasketInitialEntry = oldestEntry;
+   SymbolData[symbolIndex].BasketDirection = oldestType;
+   SymbolData[symbolIndex].GridBasketEntry = totalValue / totalVolume;
+   SymbolData[symbolIndex].GridBasketVolume = totalVolume;
+   SymbolData[symbolIndex].GridBasketTakeProfit = firstNonZeroTP;
+   SymbolData[symbolIndex].GridBasketStopLoss = firstNonZeroSL;
+   SymbolData[symbolIndex].GridLevels = logicCount;
+   SymbolData[symbolIndex].GridSequenceDepth = (int)MathMax(SymbolData[symbolIndex].GridSequenceDepth, logicCount);
+
+   bool phase2 = (firstNonZeroSL > 0.0);
+   SymbolData[symbolIndex].GridTargetReached = phase2;
+   SymbolData[symbolIndex].GridPhase2Active = phase2;
+   SymbolData[symbolIndex].GridPhase1Active = !phase2;
+   SymbolData[symbolIndex].GridInTrailing = (phase2 && UseTrailing);
+   SymbolData[symbolIndex].GridInStacking = (phase2 && UseTrailing && StackMode);
+   if(phase2)
+   {
+      SymbolData[symbolIndex].GridTPHit = true;
+      SymbolData[symbolIndex].GridTPHitPrice = firstNonZeroSL;
+      SymbolData[symbolIndex].PreviousBasketSL = firstNonZeroSL;
+   }
+
+   if(RiskMode == RISK_MODE_ZONE_RECOVERY)
+   {
+      SymbolData[symbolIndex].ZoneActive = !phase2;
+      SymbolData[symbolIndex].ZoneSeqCount = (int)MathMax(1, logicCount);
+      if(SymbolData[symbolIndex].ZoneTopPrice <= 0.0 || SymbolData[symbolIndex].ZoneBottomPrice <= 0.0)
+      {
+         if(haveEntry && maxEntry > minEntry)
+         {
+            SymbolData[symbolIndex].ZoneTopPrice = maxEntry;
+            SymbolData[symbolIndex].ZoneBottomPrice = minEntry;
+         }
+         else
+         {
+            double point = SymbolInfoDouble(trackingSymbol, SYMBOL_POINT);
+            double gapSize = ZoneGapPoints * point;
+            if(ZoneGapType == ZONE_GAP_ATR)
+            {
+               double atr[1];
+               if(CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 0, 1, atr) > 0 && atr[0] > 0.0)
+                  gapSize = atr[0] * ZoneGapATR;
+            }
+            if(gapSize <= 0.0)
+               gapSize = 50.0 * point;
+
+            if(oldestType == POSITION_TYPE_BUY)
+            {
+               SymbolData[symbolIndex].ZoneTopPrice = oldestEntry;
+               SymbolData[symbolIndex].ZoneBottomPrice = oldestEntry - gapSize;
+            }
+            else
+            {
+               SymbolData[symbolIndex].ZoneBottomPrice = oldestEntry;
+               SymbolData[symbolIndex].ZoneTopPrice = oldestEntry + gapSize;
+            }
+         }
+      }
+   }
+   else
+   {
+      SymbolData[symbolIndex].ZoneActive = false;
+      SymbolData[symbolIndex].ZoneSeqCount = 0;
+   }
+
+   if(SymbolData[symbolIndex].GridTargetProfit <= 0.0)
+      SymbolData[symbolIndex].GridTargetProfit = GetDynamicProfitTarget(symbolIndex);
+   if(SymbolData[symbolIndex].RecoveryIteration < 1)
+      SymbolData[symbolIndex].RecoveryIteration = 1;
+
+   Print(trackingSymbol, " Rebuilt basket runtime state from ", liveCount,
+         " live positions. Phase2=", (phase2 ? "true" : "false"),
+         " BasketSL=", DoubleToString(SymbolData[symbolIndex].GridBasketStopLoss,
+                                      (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)));
+
+   if(persistAfter)
+      SaveBasketRuntimeState(symbolIndex);
+
+   return true;
+}
+
+bool LoadBasketRuntimeState(const int symbolIndex)
+{
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return false;
+   if(!SymbolData[symbolIndex].active)
+      return false;
+   if(RiskMode != RISK_MODE_GRID && RiskMode != RISK_MODE_ZONE_RECOVERY)
+      return false;
+
+   bool hasLivePositions = BasketRuntimeHasLivePositions(symbolIndex);
+   if(!hasLivePositions)
+   {
+      ClearBasketRuntimeState(symbolIndex);
+      return false;
+   }
+
+   string stateFile = MBP_BasketRuntimeStateFileName(symbolIndex);
+   bool loadedLegacyState = false;
+   if(stateFile == "" || !FileIsExist(stateFile, FILE_COMMON))
+   {
+      string legacyStateFile = MBP_BasketRuntimeLegacyStateFileName(symbolIndex);
+      if(legacyStateFile == "" || !FileIsExist(legacyStateFile, FILE_COMMON))
+         return RebuildBasketRuntimeStateFromOpenPositions(symbolIndex, true);
+
+      stateFile = legacyStateFile;
+      loadedLegacyState = true;
+   }
+
+   int handle = FileOpen(stateFile, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   if(handle == INVALID_HANDLE)
+      return RebuildBasketRuntimeStateFromOpenPositions(symbolIndex, true);
+
+   string payload = "";
+   while(!FileIsEnding(handle))
+      payload += FileReadString(handle) + "\n";
+   FileClose(handle);
+
+   if(payload == "")
+      return RebuildBasketRuntimeStateFromOpenPositions(symbolIndex, true);
+
+   int savedRiskMode = MBP_StateReadInteger(payload, "risk_mode", -1);
+   if(savedRiskMode != (int)RiskMode)
+      return RebuildBasketRuntimeStateFromOpenPositions(symbolIndex, true);
+
+   SymbolData[symbolIndex].BasketActive = MBP_StateReadBool(payload, "basket_active", true);
+   SymbolData[symbolIndex].BasketInitialEntry = MBP_StateReadDouble(payload, "basket_initial_entry", SymbolData[symbolIndex].BasketInitialEntry);
+   SymbolData[symbolIndex].BasketDirection = (ENUM_POSITION_TYPE)MBP_StateReadInteger(payload, "basket_direction", (int)SymbolData[symbolIndex].BasketDirection);
+   SymbolData[symbolIndex].LastGridReset = (datetime)MBP_StateReadInteger(payload, "last_grid_reset", (int)SymbolData[symbolIndex].LastGridReset);
+   SymbolData[symbolIndex].GridLevels = (int)MathMax(0, MBP_StateReadInteger(payload, "grid_levels", SymbolData[symbolIndex].GridLevels));
+   SymbolData[symbolIndex].GridPhase1Active = MBP_StateReadBool(payload, "grid_phase1", SymbolData[symbolIndex].GridPhase1Active);
+   SymbolData[symbolIndex].GridPhase2Active = MBP_StateReadBool(payload, "grid_phase2", SymbolData[symbolIndex].GridPhase2Active);
+   SymbolData[symbolIndex].GridTargetReached = MBP_StateReadBool(payload, "grid_target_reached", SymbolData[symbolIndex].GridTargetReached);
+   SymbolData[symbolIndex].GridInTrailing = MBP_StateReadBool(payload, "grid_in_trailing", SymbolData[symbolIndex].GridInTrailing);
+   SymbolData[symbolIndex].GridInStacking = MBP_StateReadBool(payload, "grid_in_stacking", SymbolData[symbolIndex].GridInStacking);
+   SymbolData[symbolIndex].GridBasketStopLoss = MBP_StateReadDouble(payload, "grid_basket_sl", SymbolData[symbolIndex].GridBasketStopLoss);
+   SymbolData[symbolIndex].GridBasketTakeProfit = MBP_StateReadDouble(payload, "grid_basket_tp", SymbolData[symbolIndex].GridBasketTakeProfit);
+   SymbolData[symbolIndex].GridBasketEntry = MBP_StateReadDouble(payload, "grid_basket_entry", SymbolData[symbolIndex].GridBasketEntry);
+   SymbolData[symbolIndex].GridBasketVolume = MBP_StateReadDouble(payload, "grid_basket_volume", SymbolData[symbolIndex].GridBasketVolume);
+   SymbolData[symbolIndex].GridTargetProfit = MBP_StateReadDouble(payload, "grid_target_profit", SymbolData[symbolIndex].GridTargetProfit);
+   SymbolData[symbolIndex].RawNextGridLot = MBP_StateReadDouble(payload, "raw_next_grid_lot", SymbolData[symbolIndex].RawNextGridLot);
+   SymbolData[symbolIndex].LastUsedGridRawLot = MBP_StateReadDouble(payload, "last_used_grid_raw_lot", SymbolData[symbolIndex].LastUsedGridRawLot);
+   SymbolData[symbolIndex].RawNextStackLot = MBP_StateReadDouble(payload, "raw_next_stack_lot", SymbolData[symbolIndex].RawNextStackLot);
+   SymbolData[symbolIndex].LastUsedStackRawLot = MBP_StateReadDouble(payload, "last_used_stack_raw_lot", SymbolData[symbolIndex].LastUsedStackRawLot);
+   SymbolData[symbolIndex].GridTPHit = MBP_StateReadBool(payload, "grid_tp_hit", SymbolData[symbolIndex].GridTPHit);
+   SymbolData[symbolIndex].GridTPHitPrice = MBP_StateReadDouble(payload, "grid_tp_hit_price", SymbolData[symbolIndex].GridTPHitPrice);
+   SymbolData[symbolIndex].GridSequenceDepth = (int)MathMax(SymbolData[symbolIndex].GridLevels, MBP_StateReadInteger(payload, "grid_sequence_depth", SymbolData[symbolIndex].GridSequenceDepth));
+   SymbolData[symbolIndex].ZoneActive = MBP_StateReadBool(payload, "zone_active", SymbolData[symbolIndex].ZoneActive);
+   SymbolData[symbolIndex].ZoneTopPrice = MBP_StateReadDouble(payload, "zone_top", SymbolData[symbolIndex].ZoneTopPrice);
+   SymbolData[symbolIndex].ZoneBottomPrice = MBP_StateReadDouble(payload, "zone_bottom", SymbolData[symbolIndex].ZoneBottomPrice);
+   SymbolData[symbolIndex].ZoneSeqCount = (int)MathMax(0, MBP_StateReadInteger(payload, "zone_seq_count", SymbolData[symbolIndex].ZoneSeqCount));
+   SymbolData[symbolIndex].ZoneResolved = MBP_StateReadBool(payload, "zone_resolved", SymbolData[symbolIndex].ZoneResolved);
+   SymbolData[symbolIndex].CurrentRecoveryPortion = MBP_StateReadDouble(payload, "current_recovery_portion", SymbolData[symbolIndex].CurrentRecoveryPortion);
+   SymbolData[symbolIndex].PruningOccurredThisSequence = MBP_StateReadBool(payload, "pruning_occurred", SymbolData[symbolIndex].PruningOccurredThisSequence);
+   SymbolData[symbolIndex].RecoveryIteration = (int)MathMax(1, MBP_StateReadInteger(payload, "recovery_iteration", SymbolData[symbolIndex].RecoveryIteration));
+
+   CalculateGridBasket(symbolIndex);
+   if(SymbolData[symbolIndex].GridTargetProfit <= 0.0)
+      SymbolData[symbolIndex].GridTargetProfit = GetDynamicProfitTarget(symbolIndex);
+   if(SymbolData[symbolIndex].GridPhase2Active && SymbolData[symbolIndex].GridBasketStopLoss <= 0.0)
+      return RebuildBasketRuntimeStateFromOpenPositions(symbolIndex, true);
+
+   string trackingSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(trackingSymbol == "")
+      trackingSymbol = SymbolData[symbolIndex].symbol;
+   Print(trackingSymbol, " Loaded basket runtime state. Phase1=",
+         (SymbolData[symbolIndex].GridPhase1Active ? "true" : "false"),
+         " Phase2=", (SymbolData[symbolIndex].GridPhase2Active ? "true" : "false"),
+         " TargetHit=", (SymbolData[symbolIndex].GridTPHit ? "true" : "false"));
+
+   if(loadedLegacyState)
+      SaveBasketRuntimeState(symbolIndex);
+
+   return true;
+}
+
 //+------------------------------------------------------------------+
 //| Manage all positions on tick - FIXED (Delayed Trail Integration) |
 //+------------------------------------------------------------------+
@@ -1458,7 +1924,10 @@ if(InpEnableMultiBaskets && !isManualTrade && basketId > 0)
 
          // Add Volume to Trackers (For EVERY split trade)
          if(RiskMode == RISK_MODE_ZONE_RECOVERY || RiskMode == RISK_MODE_GRID)
+         {
             SymbolData[symbolIndex].GridBasketVolume += lotPerTrade;
+            SaveBasketRuntimeState(symbolIndex);
+         }
 
         } // End Success
      } // End Loop
@@ -2017,7 +2486,10 @@ void CheckGridTargetOnTick(int symbolIndex)
            {
             SymbolData[symbolIndex].GridTPHit = true;
             SymbolData[symbolIndex].GridTPHitPrice = priceX; // Lock SL at Impulse Price
-            //Print(trackingSymbol, " Grid Impulse Hit at ", priceX, ". Waiting for Buffer...");
+            SaveBasketRuntimeState(symbolIndex);
+             Print(trackingSymbol, " Grid Phase 2 impulse marker hit at ",
+                   DoubleToString(priceX, (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)),
+                   ". Waiting for transition buffer.");
            }
         }
 
@@ -2059,8 +2531,12 @@ void CheckGridTargetOnTick(int symbolIndex)
         {
          SymbolData[symbolIndex].GridTPHit = true;
          SymbolData[symbolIndex].GridTPHitPrice = currentPrice; // Lock SL at Current Price (Dollar Hit)
-         //Print(trackingSymbol, " Grid Profit Target Hit. Waiting for transition...");
-        }
+         SaveBasketRuntimeState(symbolIndex);
+          Print(trackingSymbol, " Grid profit target hit ($",
+                DoubleToString(totalGridProfit, 2), " / $",
+                DoubleToString(SymbolData[symbolIndex].GridTargetProfit, 2),
+                "). Waiting for transition buffer.");
+         }
 
       // B. Calculate Buffer
       double buffer = 0;
@@ -2098,6 +2574,7 @@ void CheckGridTargetOnTick(int symbolIndex)
         {
          SymbolData[symbolIndex].GridTPHit = false;
          SymbolData[symbolIndex].GridTPHitPrice = 0;
+         SaveBasketRuntimeState(symbolIndex);
         }
      }
 
@@ -2106,9 +2583,14 @@ void CheckGridTargetOnTick(int symbolIndex)
      {
       if(HideSLTPDuringCloseBlock && G_Cache_IsDailyCloseBlock && GridCloseOnTP) return; // Wait to close
       SymbolData[symbolIndex].GridTargetReached = true;
+      SaveBasketRuntimeState(symbolIndex);
+      Print(trackingSymbol, " Grid Phase 2 transition trigger confirmed. GridCloseOnTP=",
+            (GridCloseOnTP ? "true" : "false"), " | UseTrailing=",
+            (UseTrailing ? "true" : "false"), " | LockTrail=",
+            EnumToString(LockTrail));
       TransitionToGridPhase2(symbolIndex);
-     }
-  }
+      }
+   }
 
 
 //+------------------------------------------------------------------+
@@ -2238,6 +2720,7 @@ void TransitionToGridPhase2(int symbolIndex)
 // OPTION A: Close Everything (Default)
    if(GridCloseOnTP)
      {
+      Print(trackingSymbol, " Grid target reached but GridCloseOnTP=true, so Phase 2 trailing is bypassed and basket will close.");
       CloseAllGridPositions(symbolIndex, "Grid TP Reached - Closing All");
       SymbolData[symbolIndex].GridPhase1Active = false;
       SymbolData[symbolIndex].GridPhase2Active = false;
@@ -2264,17 +2747,20 @@ void TransitionToGridPhase2(int symbolIndex)
       // Normalize SL
       SymbolData[symbolIndex].GridBasketStopLoss = NormalizePrice(trackingSymbol, SymbolData[symbolIndex].GridBasketStopLoss);
 
-      // 3. Apply Basket SL to all grid positions
-      UpdateAllGridStopLosses(symbolIndex);
-
-      // 4. Set Phase Flags
+      // 3. Set Phase Flags before applying protection.
+      // Zone phase 2 only applies SL/TP while GridPhase2Active is true.
       SymbolData[symbolIndex].GridPhase1Active = false;
       SymbolData[symbolIndex].GridPhase2Active = true;
 
-      // Enable Trailing (Uses Standard Non-Grid settings)
+      // 4. Enable Trailing (Uses Standard Non-Grid settings)
       SymbolData[symbolIndex].GridInTrailing = UseTrailing;
+      if(!UseTrailing)
+         Print(trackingSymbol, " Grid Phase 2 secured, but trailing is disabled because UseTrailing=false.");
       // Enable Stacking (Uses Standard Non-Grid settings)
       SymbolData[symbolIndex].GridInStacking = (StackMode && UseTrailing);
+
+      // 5. Apply Basket SL to all grid/zone positions
+      UpdateAllGridStopLosses(symbolIndex);
 
       SymbolData[symbolIndex].PreviousBasketSL = SymbolData[symbolIndex].GridBasketStopLoss;
       SymbolData[symbolIndex].GridTrailUpdates = 0;
@@ -2287,6 +2773,7 @@ void TransitionToGridPhase2(int symbolIndex)
       Print(trackingSymbol, " Transitioned to Grid Phase 2 (Basket Secured at Hit Price)");
       Print("  - Basket SL: ", SymbolData[symbolIndex].GridBasketStopLoss);
       SmartHedge_OnProtectedStopMove(symbolIndex, true);
+      SaveBasketRuntimeState(symbolIndex);
      }
   }
 
@@ -2405,7 +2892,9 @@ void ManageGridPhase2(int symbolIndex)
 //+------------------------------------------------------------------+
 void CheckGridTrailingConditions(int symbolIndex)
 {
-   string trackingSymbol = SymbolData[symbolIndex].symbol;
+   string trackingSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(trackingSymbol == "")
+      trackingSymbol = SymbolData[symbolIndex].symbol;
    bool filterByBasket = InpEnableMultiBaskets;
 
    // --- FIX 1: SYMBOL SPECIFIC PRECISION ---
@@ -2508,63 +2997,43 @@ void CheckGridTrailingConditions(int symbolIndex)
      }
    else if(TrailType == TRAIL_ATR)
      {
-         double atr[1];
-         // ATR Safety Check: Ensure Handle is valid and we get data
-         if(SymbolData[symbolIndex].ATR_Handle != INVALID_HANDLE && 
-            CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 0, 1, atr) > 0)
-           {
-            double atrValue = atr[0];
-            
-            // Proceed only if ATR is valid
-            if(atrValue > 0)
-            {
-               double stepDist = atrValue * TrailATR_Update; 
+      double atr[1];
+      bool atrOk = false;
+      double atrValue = 0.0;
 
-               if(trailDirection == POSITION_TYPE_BUY)
-                 {
-                  double requiredDist = atrValue * TrailATR_Multiplier;
-                  
-                  // Calculate raw candidate
-                  double candidateSL = currentPrice - requiredDist;
-                  
-                  // FIX: Normalize candidate to symbol digits immediately
-                  candidateSL = NormalizeDouble(candidateSL, symDigits);
+      if(SymbolData[symbolIndex].ATR_Handle != INVALID_HANDLE &&
+         CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 0, 1, atr) > 0 &&
+         atr[0] > 0)
+      {
+         atrValue = atr[0];
+         atrOk = true;
+      }
 
-                  // --- FIX 2: HANDLE INITIALIZATION (CurrentSL == 0) ---
-                  // If SL is 0, we accept the first valid calculation immediately.
-                  // Otherwise, we require the move to be larger than 'stepDist'.
-                  if(currentSL == 0 || candidateSL > (currentSL + stepDist))
-                    {
-                     newSL = candidateSL;
-                    }
-                 }
-               else // SELL
-                 {
-                  double requiredDist = atrValue * TrailATR_Multiplier;
-                  
-                  // Calculate raw candidate
-                  double candidateSL = currentPrice + requiredDist;
+      if(!atrOk)
+      {
+         long stopsLevelPoints = SymbolInfoInteger(trackingSymbol, SYMBOL_TRADE_STOPS_LEVEL);
+         atrValue = MathMax(500 * symPoint, (stopsLevelPoints + 10) * symPoint);
+         if(SymbolData[symbolIndex].GridPhase2Active && TimeCurrent() % 30 == 0)
+            Print(trackingSymbol, " Warning: ATR unavailable for Phase 2 trail. Using point fallback distance ",
+                  DoubleToString(atrValue, symDigits), ".");
+      }
 
-                  // FIX: Normalize candidate to symbol digits immediately
-                  candidateSL = NormalizeDouble(candidateSL, symDigits);
+      double stepDist = MathMax(symPoint, atrValue * TrailATR_Update);
+      double requiredDist = MathMax(symPoint, atrValue * TrailATR_Multiplier);
 
-                  // --- FIX 2: HANDLE INITIALIZATION (CurrentSL == 0) ---
-                  // If SL is 0, we accept the first valid calculation immediately.
-                  // Otherwise, we require the move to be lower than 'currentSL - stepDist'.
-                  if(currentSL == 0 || candidateSL < (currentSL - stepDist))
-                    {
-                     newSL = candidateSL;
-                    }
-                 }
-            }
-           }
-         else
-           {
-            // Debug throttle to avoid spamming logs if ATR fails
-            if(SymbolData[symbolIndex].GridPhase2Active && TimeCurrent() % 10 == 0)
-               Print(trackingSymbol, " Warning: ATR CopyBuffer Failed. Trailing Stopped.");
-           }
-     }
+      if(trailDirection == POSITION_TYPE_BUY)
+      {
+         double candidateSL = NormalizeDouble(currentPrice - requiredDist, symDigits);
+         if(currentSL == 0 || candidateSL > (currentSL + stepDist))
+            newSL = candidateSL;
+      }
+      else
+      {
+         double candidateSL = NormalizeDouble(currentPrice + requiredDist, symDigits);
+         if(currentSL == 0 || candidateSL < (currentSL - stepDist))
+            newSL = candidateSL;
+      }
+      }
 
 // 4. Submit Update
    // Ensure final value is normalized
@@ -2650,7 +3119,7 @@ void UpdateAllGridStopLosses(int symbolIndex)
                   // AND the distance is valid.
                   if(dist > minDistance) 
                   {
-                     if(MathAbs(currentSL - validLevel) > _Point)
+                      if(MathAbs(currentSL - validLevel) > point)
                      {
                         newSL = validLevel;
                         modify = true;
@@ -2673,7 +3142,7 @@ void UpdateAllGridStopLosses(int symbolIndex)
                         // Check distance: Bid must be higher than SL by minDistance
                         if((bid - validLevel) > minDistance)
                         {
-                           if(MathAbs(currentSL - validLevel) > _Point)
+                            if(MathAbs(currentSL - validLevel) > point)
                            {
                               newSL = validLevel;
                               modify = true;
@@ -2686,7 +3155,7 @@ void UpdateAllGridStopLosses(int symbolIndex)
                         // Check distance: Level must be higher than Bid by minDistance
                         if((validLevel - bid) > minDistance)
                         {
-                           if(MathAbs(currentTP - validLevel) > _Point)
+                            if(MathAbs(currentTP - validLevel) > point)
                            {
                               newTP = validLevel;
                               modify = true;
@@ -2702,7 +3171,7 @@ void UpdateAllGridStopLosses(int symbolIndex)
                         // Check distance: SL must be higher than Ask by minDistance
                         if((validLevel - ask) > minDistance)
                         {
-                           if(MathAbs(currentSL - validLevel) > _Point)
+                            if(MathAbs(currentSL - validLevel) > point)
                            {
                               newSL = validLevel;
                               modify = true;
@@ -2715,7 +3184,7 @@ void UpdateAllGridStopLosses(int symbolIndex)
                         // Check distance: Ask must be higher than Level by minDistance
                         if((ask - validLevel) > minDistance)
                         {
-                           if(MathAbs(currentTP - validLevel) > _Point)
+                            if(MathAbs(currentTP - validLevel) > point)
                            {
                               newTP = validLevel;
                               modify = true;
@@ -2728,10 +3197,21 @@ void UpdateAllGridStopLosses(int symbolIndex)
                // =================================================================
                // EXECUTE MODIFICATION
                // =================================================================
-               if(modify)
-               {
-                  Trade.PositionModify(ticket, newSL, newTP);
-               }
+                if(modify)
+                {
+                   ResetLastError();
+                   if(!Trade.PositionModify(ticket, newSL, newTP))
+                   {
+                      Print(trackingSymbol, " Phase 2 SL/TP modify failed. Ticket=", ticket,
+                            " SL=", DoubleToString(newSL, (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)),
+                            " TP=", DoubleToString(newTP, (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)),
+                            " Bid=", DoubleToString(bid, (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)),
+                            " Ask=", DoubleToString(ask, (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)),
+                            " MinDistance=", DoubleToString(minDistance, (int)SymbolInfoInteger(trackingSymbol, SYMBOL_DIGITS)),
+                            " Retcode=", Trade.ResultRetcode(),
+                            " Error=", _LastError);
+                   }
+                }
             }
          }
       }
@@ -2889,6 +3369,8 @@ void ResetGridTracking(int symbolIndex, bool skipReconciliation = false)
    {
       SymbolData[symbolIndex].LastGridReset = TimeCurrent();
    }
+
+   ClearBasketRuntimeState(symbolIndex);
   }
 
 //+------------------------------------------------------------------+
@@ -3027,6 +3509,7 @@ void CheckZoneRecovery(int symbolIndex)
 
          // Ensure Zone Active Flag is Set
          SymbolData[symbolIndex].ZoneActive = true;
+         SaveBasketRuntimeState(symbolIndex);
         }
 
       // C. CALCULATE LOT SIZE
@@ -3163,6 +3646,7 @@ void CheckZoneTarget(int symbolIndex)
            {
             SymbolData[symbolIndex].GridTPHit = true;
             SymbolData[symbolIndex].GridTPHitPrice = priceX; // Lock SL exactly at Price X
+            SaveBasketRuntimeState(symbolIndex);
             //Print(trackingSymbol, " Zone Impulse Hit at ", priceX, ". Waiting for Buffer (", DoubleToString(bufferDist/_Point,0), " pts)...");
            }
         }
@@ -3232,13 +3716,15 @@ void CheckZoneTarget(int symbolIndex)
               {
                SymbolData[symbolIndex].GridTPHit = true;
                SymbolData[symbolIndex].GridTPHitPrice = currentPrice; // Here we lock at CURRENT price because it's dollar based
+               SaveBasketRuntimeState(symbolIndex);
                Print(trackingSymbol, " Zone Recovery TP Met. Marked Price: ", currentPrice);
               }
 
             double point = SymbolInfoDouble(trackingSymbol, SYMBOL_POINT);
-            double buffer = ZoneTransitionDist * point; // Default point calc logic if ATR not explicit
-            // If you have explicit ATR logic for transition, use it here:
-            // if(GridTransitionType == GRID_DIST_ATR) ...
+            double buffer = 50 * point;
+            double atr[1];
+            if(ZoneTransitionDist > 0 && CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+               buffer = atr[0] * ZoneTransitionDist;
 
             if(winningIsBuy && currentPrice >= (SymbolData[symbolIndex].GridTPHitPrice + buffer))
                readyToTransition = true;
@@ -3265,6 +3751,7 @@ void CheckZoneTarget(int symbolIndex)
       SymbolData[symbolIndex].ZoneActive = false;
       ObjectDelete(0, BasketScopedObjectName(symbolIndex, "ZoneTop_", trackingSymbol));
       ObjectDelete(0, BasketScopedObjectName(symbolIndex, "ZoneBot_", trackingSymbol));
+      SaveBasketRuntimeState(symbolIndex);
      }
   }
 
@@ -3844,6 +4331,7 @@ void OpenGridStackTrade(int symbolIndex)
    if(tradeResult)
      {
       SymbolData[symbolIndex].GridStackLevels++;
+      SaveBasketRuntimeState(symbolIndex);
       // Note: We do NOT add this to GridBasketVolume to avoid messing up the original Zone calculations
 
       Print(execSymbol, " ✅ Stack trade opened. Level: ", SymbolData[symbolIndex].GridStackLevels,
@@ -3911,6 +4399,7 @@ void ApplyPendingTrail(int symbolIndex)
          SymbolData[symbolIndex].GridSLMovedThisTick = true;
 
          Print(symbol, " BASKET SL MOVED! Stack Signal Sent. New Level: ", SymbolData[symbolIndex].GridBasketStopLoss);
+         SaveBasketRuntimeState(symbolIndex);
         }
 
       SymbolData[symbolIndex].HasPendingTrail = false;

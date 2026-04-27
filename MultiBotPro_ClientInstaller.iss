@@ -4,10 +4,10 @@
 
 [Setup]
 AppName=MultiBotPro Standalone
-AppVersion=1.0
+AppVersion=1.2
 DefaultDirName={autopf}\MultiBotPro
 DisableProgramGroupPage=yes
-OutputBaseFilename=MultiBotPro_v1.0_Setup
+OutputBaseFilename=MultiBotPro_v1.2_Setup
 OutputDir=Output
 SetupIconFile=romeo.ico
 Compression=lzma

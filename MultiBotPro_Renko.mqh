@@ -1245,13 +1245,10 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
       double bid = (sourceBid > 0.0) ? NormalizePrice(sourceBid) : m_lastLivePrice;
       double ask = (sourceAsk > bid) ? NormalizePrice(sourceAsk) : NormalizePrice(bid + point);
       UpdateCustomQuoteFields(bid, ask);
-      PublishLiveQuoteTick(bid, ask, candidateTickMsc);
-
-      if(!ShouldPublishDirectPreview(forcePublish))
-         return;
-
       DeletePublishedLivePreviewRate();
-      PublishLivePreviewRate();
+      RefreshChartHandle();
+      if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
+         ChartRedraw(m_chartID);
       return;
    }
 
@@ -2075,7 +2072,6 @@ int CRenkoEngine::FeedWorkerTicksBatch(const MqlTick &ticks[], const int startIn
          point = _Point;
       double liveAsk = (lastMirrorAsk > lastMirrorBid) ? lastMirrorAsk : (lastMirrorBid + point);
       UpdateCustomQuoteFields(lastMirrorBid, liveAsk);
-      PublishLiveQuoteTick(lastMirrorBid, liveAsk, lastMirrorTimeMsc);
    }
 
    int closed = 0;
