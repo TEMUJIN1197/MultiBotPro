@@ -3161,12 +3161,31 @@ bool MBP_EnforceWorkerChartSymbol()
    return false;
 }
 
-void MasterPublishWorkerHeartbeat()
+void MasterPublishWorkerHeartbeat(const bool enforceChartSymbol = true)
 {
    if(!IsParallelWorkerMode())
       return;
 
-   if(!MBP_EnforceWorkerChartSymbol())
+   if(G_RuntimeAssignedSlotId >= 0 &&
+      !MBP_IsWorkerLeaseCurrent(G_RuntimeCoordinatorKey,
+                                G_RuntimeAssignedSlotId,
+                                G_RuntimeAssignedLeaseId,
+                                G_RuntimeAssignedWorkerSignature))
+   {
+      static bool warnedStaleLease = false;
+      if(!warnedStaleLease)
+      {
+         Print(EmojiWarning(), " Worker slot ", G_RuntimeAssignedSlotId,
+               " on chart ", ChartID(),
+               " has stale lease ", G_RuntimeAssignedLeaseId,
+               ". Removing EA so the coordinator can keep one active worker for the slot.");
+         warnedStaleLease = true;
+      }
+      ExpertRemove();
+      return;
+   }
+
+   if(enforceChartSymbol && !MBP_EnforceWorkerChartSymbol())
       return;
 
    ulong nowMs = GetTickCount();
@@ -3240,6 +3259,15 @@ void MasterPublishWorkerHeartbeat()
    G_LastWorkerHeartbeatPublishMs = nowMs;
 }
 
+void MasterPumpWorkerSupervisorPriority()
+{
+   if(IsParallelWorkerMode())
+      MasterPublishWorkerHeartbeat(false);
+
+   if(IsParallelCoordinatorMode())
+      MasterEnsureRuntimeWorkers();
+}
+
 bool MasterRuntimeShouldHandleTradeSymbol(const string symbol)
 {
    if(IsParallelCoordinatorMode())
@@ -3271,11 +3299,11 @@ void MasterEnsureRuntimeWorkers()
    if(!MasterSaveWorkerTemplate(false))
       return;
 
-   ulong heartbeatTtlMs = (ulong)MathMax(30000, heartbeatIntervalMs * missedLimit);
-   ulong bootingTtlMs = (ulong)MathMax(180000, heartbeatTtlMs * 20);
+   ulong heartbeatTtlMs = (ulong)MathMax(600000, heartbeatIntervalMs * missedLimit);
+   ulong bootingTtlMs = (ulong)MathMax(180000, heartbeatIntervalMs * missedLimit * 20);
    ulong relaunchGraceMs = (ulong)MathMax(2000, heartbeatIntervalMs * missedLimit);
    ulong initialAttachGraceMs = (ulong)MathMax(180000, heartbeatIntervalMs * 100);
-   ulong staleHeartbeatWarnMs = 5000;
+   ulong staleHeartbeatWarnMs = 60000;
    string templateName = MBP_WorkerTemplateName();
    ENUM_TIMEFRAMES targetPeriod = (ENUM_TIMEFRAMES)ChartPeriod(0);
    string coordinatorKey = MBP_GetActiveCoordinatorKey();
@@ -3524,8 +3552,13 @@ void MasterEnsureRuntimeWorkers()
                                           G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
                                           (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < initialAttachGraceMs);
          bool bootingGraceActive = (heartbeatBelongsToLiveChart && workerBooting && heartbeatAgeMs <= bootingTtlMs);
+         bool liveChartHasAcceptedHeartbeat = (heartbeatBelongsToLiveChart ||
+                                               G_WorkerSlots[i].lastHeartbeat > 0);
+         bool liveChartSoftPreserveActive = (liveChartHasAcceptedHeartbeat &&
+                                             !workerStopped &&
+                                             heartbeatAgeMs <= heartbeatTtlMs);
 
-         if(initialAttachGraceActive || bootingGraceActive)
+         if(initialAttachGraceActive || bootingGraceActive || liveChartSoftPreserveActive)
          {
             if(G_WorkerSlots[i].lastStaleHeartbeatWarnMs == 0 ||
                (nowMs - G_WorkerSlots[i].lastStaleHeartbeatWarnMs) >= staleHeartbeatWarnMs)
@@ -3535,9 +3568,11 @@ void MasterEnsureRuntimeWorkers()
                      " is assigned on chart ", liveChartId,
                      " but heartbeat is stale/missing (state=", staleState,
                      ", age=", heartbeatAgeSec,
-                     "s). Preserving chart during startup grace; no template reload.");
+                     "s). Preserving live assigned chart; no template reload.");
                G_WorkerSlots[i].lastStaleHeartbeatWarnMs = nowMs;
             }
+            if(liveChartSoftPreserveActive)
+               G_WorkerSlots[i].missedHeartbeats = 0;
             continue;
          }
 
@@ -7388,6 +7423,8 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
+   MasterPumpWorkerSupervisorPriority();
+
    if(IsSlaveModeSelected())
    {
       RefreshSystemSnapshot(false, true, false, false, "");
