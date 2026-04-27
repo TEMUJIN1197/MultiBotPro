@@ -2748,75 +2748,47 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
             assignedCoordinatorKey = StringFormat("%s_%I64d",
                                                   MBP_SanitizeRuntimeToken(InpHedgeChannel),
                                                   assignedCoordinatorChartId);
-         if(assignedSlotId >= 0 &&
-            assignedLeaseId != "" &&
-            !MBP_IsWorkerLeaseCurrent(assignedCoordinatorKey,
-                                      assignedSlotId,
-                                      assignedLeaseId,
-                                      assignedSignature))
+         G_RuntimeAssignedSlotId = assignedSlotId;
+         G_RuntimeAssignedLeaseId = assignedLeaseId;
+         G_RuntimeAssignedWorkerSymbol = assignedSymbol;
+         G_RuntimeAssignedSymbolsCsv = assignedSymbolsCsv;
+         G_RuntimeAssignedChartSymbol = assignedChartSymbol;
+         G_RuntimeAssignedWorkerSignature = assignedSignature;
+         MBP_ParseSymbolCsv(G_RuntimeAssignedSymbolsCsv, G_RuntimeAssignedSymbols);
+         if(G_RuntimeAssignedWorkerSymbol == "" && ArraySize(G_RuntimeAssignedSymbols) > 0)
+            G_RuntimeAssignedWorkerSymbol = G_RuntimeAssignedSymbols[0];
+         if(G_RuntimeAssignedChartSymbol == "")
+            G_RuntimeAssignedChartSymbol = currentChartSymbol;
+         if(ArraySize(G_RuntimeAssignedSymbols) <= 0 && G_RuntimeAssignedWorkerSymbol != "")
          {
-            string staleAssignmentFile = MBP_WorkerAssignmentFile(ChartID());
-            if(FileIsExist(staleAssignmentFile, FILE_COMMON))
-               FileDelete(staleAssignmentFile, FILE_COMMON);
-            string legacyAssignmentFile = MBP_LegacyWorkerAssignmentFile(ChartID());
-            if(FileIsExist(legacyAssignmentFile, FILE_COMMON))
-               FileDelete(legacyAssignmentFile, FILE_COMMON);
-            Print(EmojiWarning(), " Ignoring stale worker assignment on chart ", ChartID(),
-                  " for slot ", assignedSlotId, " lease=", assignedLeaseId, ".");
-            G_RuntimeCoordinatorKey = assignedCoordinatorKey;
-            G_RuntimeAssignedSlotId = assignedSlotId;
-            G_RuntimeAssignedLeaseId = assignedLeaseId;
-            G_RuntimeAssignedWorkerSymbol = assignedSymbol;
-            G_RuntimeAssignedSymbolsCsv = assignedSymbolsCsv;
-            G_RuntimeAssignedChartSymbol = assignedChartSymbol;
-            G_RuntimeAssignedWorkerSignature = assignedSignature;
-            ExpertRemove();
-            return MBP_RUNTIME_WORKER;
+            ArrayResize(G_RuntimeAssignedSymbols, 1);
+            G_RuntimeAssignedSymbols[0] = G_RuntimeAssignedWorkerSymbol;
          }
-         else
+         G_RuntimeCoordinatorKey = assignedCoordinatorKey;
+         if(G_RuntimeAssignedSlotId >= 0)
          {
-            G_RuntimeAssignedSlotId = assignedSlotId;
-            G_RuntimeAssignedLeaseId = assignedLeaseId;
-            G_RuntimeAssignedWorkerSymbol = assignedSymbol;
-            G_RuntimeAssignedSymbolsCsv = assignedSymbolsCsv;
-            G_RuntimeAssignedChartSymbol = assignedChartSymbol;
-            G_RuntimeAssignedWorkerSignature = assignedSignature;
-            MBP_ParseSymbolCsv(G_RuntimeAssignedSymbolsCsv, G_RuntimeAssignedSymbols);
-            if(G_RuntimeAssignedWorkerSymbol == "" && ArraySize(G_RuntimeAssignedSymbols) > 0)
-               G_RuntimeAssignedWorkerSymbol = G_RuntimeAssignedSymbols[0];
-            if(G_RuntimeAssignedChartSymbol == "")
-               G_RuntimeAssignedChartSymbol = currentChartSymbol;
-            if(ArraySize(G_RuntimeAssignedSymbols) <= 0 && G_RuntimeAssignedWorkerSymbol != "")
-            {
-               ArrayResize(G_RuntimeAssignedSymbols, 1);
-               G_RuntimeAssignedSymbols[0] = G_RuntimeAssignedWorkerSymbol;
-            }
-            G_RuntimeCoordinatorKey = assignedCoordinatorKey;
-            if(G_RuntimeAssignedSlotId >= 0)
-            {
-               MBP_WriteWorkerPingRecord(G_RuntimeAssignedSlotId,
-                                         G_RuntimeAssignedLeaseId,
-                                         G_RuntimeAssignedWorkerSymbol,
-                                         G_RuntimeCoordinatorKey,
-                                         G_RuntimeAssignedChartSymbol,
-                                         G_RuntimeAssignedSymbolsCsv,
-                                         G_RuntimeAssignedWorkerSignature,
-                                         "BOOTING",
-                                         0,
-                                         TimeCurrent(),
-                                         ChartID());
-            }
-            MBP_WriteWorkerHeartbeatRecord(G_RuntimeAssignedWorkerSymbol,
-                                           G_RuntimeCoordinatorKey,
-                                           G_RuntimeAssignedChartSymbol,
-                                           G_RuntimeAssignedSymbolsCsv,
-                                           G_RuntimeAssignedWorkerSignature,
-                                           "BOOTING",
-                                           0,
-                                           TimeCurrent(),
-                                           ChartID());
-            return MBP_RUNTIME_WORKER;
+            MBP_WriteWorkerPingRecord(G_RuntimeAssignedSlotId,
+                                      G_RuntimeAssignedLeaseId,
+                                      G_RuntimeAssignedWorkerSymbol,
+                                      G_RuntimeCoordinatorKey,
+                                      G_RuntimeAssignedChartSymbol,
+                                      G_RuntimeAssignedSymbolsCsv,
+                                      G_RuntimeAssignedWorkerSignature,
+                                      "BOOTING",
+                                      0,
+                                      TimeCurrent(),
+                                      ChartID());
          }
+         MBP_WriteWorkerHeartbeatRecord(G_RuntimeAssignedWorkerSymbol,
+                                        G_RuntimeCoordinatorKey,
+                                        G_RuntimeAssignedChartSymbol,
+                                        G_RuntimeAssignedSymbolsCsv,
+                                        G_RuntimeAssignedWorkerSignature,
+                                        "BOOTING",
+                                        0,
+                                        TimeCurrent(),
+                                        ChartID());
+         return MBP_RUNTIME_WORKER;
       }
 
       if(!coordinatorAlive && !assignmentFresh)
@@ -3122,12 +3094,10 @@ bool MBP_EnforceWorkerChartSymbol()
       {
          Print(EmojiWarning(), " Worker slot ", G_RuntimeAssignedSlotId,
                " on chart ", ChartID(),
-               " has stale lease ", G_RuntimeAssignedLeaseId,
-               ". Removing EA so the coordinator can keep one active worker for the slot.");
+               " has a lease older than the coordinator slot file. Keeping chart alive; coordinator will arbitrate.");
          warnedStaleLease = true;
       }
-      ExpertRemove();
-      return false;
+      return true;
    }
 
    string assignedChartSymbol = G_RuntimeAssignedChartSymbol;
@@ -3165,25 +3135,6 @@ void MasterPublishWorkerHeartbeat(const bool enforceChartSymbol = true)
 {
    if(!IsParallelWorkerMode())
       return;
-
-   if(G_RuntimeAssignedSlotId >= 0 &&
-      !MBP_IsWorkerLeaseCurrent(G_RuntimeCoordinatorKey,
-                                G_RuntimeAssignedSlotId,
-                                G_RuntimeAssignedLeaseId,
-                                G_RuntimeAssignedWorkerSignature))
-   {
-      static bool warnedStaleLease = false;
-      if(!warnedStaleLease)
-      {
-         Print(EmojiWarning(), " Worker slot ", G_RuntimeAssignedSlotId,
-               " on chart ", ChartID(),
-               " has stale lease ", G_RuntimeAssignedLeaseId,
-               ". Removing EA so the coordinator can keep one active worker for the slot.");
-         warnedStaleLease = true;
-      }
-      ExpertRemove();
-      return;
-   }
 
    if(enforceChartSymbol && !MBP_EnforceWorkerChartSymbol())
       return;
@@ -3417,25 +3368,34 @@ void MasterEnsureRuntimeWorkers()
       bool leaseMatches = (G_WorkerSlots[i].leaseId == "" ||
                            pingLeaseId == "" ||
                            StringCompare(pingLeaseId, G_WorkerSlots[i].leaseId, false) == 0);
+      bool heartbeatChartAliveBeforeLeaseCheck = (heartbeatChartId > 0 && MBP_IsChartAlive(heartbeatChartId));
       if(hasHeartbeat &&
          G_WorkerSlots[i].leaseId != "" &&
          pingLeaseId != "" &&
          !leaseMatches)
       {
-         string stalePingFile = MBP_WorkerPingFile(coordinatorKey, slotId);
-         if(FileIsExist(stalePingFile, FILE_COMMON))
-            FileDelete(stalePingFile, FILE_COMMON);
-         hasHeartbeat = false;
-         pingLeaseId = "";
-         pingSymbol = "";
-         heartbeat = 0;
-         heartbeatMs = 0;
-         heartbeatChartId = 0;
-         heartbeatChartSymbol = "";
-         heartbeatSymbolsCsv = "";
-         heartbeatSignature = "";
-         heartbeatState = "";
-         signatureMatches = true;
+         if(signatureMatches && heartbeatChartAliveBeforeLeaseCheck)
+         {
+            G_WorkerSlots[i].leaseId = pingLeaseId;
+            leaseMatches = true;
+         }
+         else
+         {
+            string stalePingFile = MBP_WorkerPingFile(coordinatorKey, slotId);
+            if(FileIsExist(stalePingFile, FILE_COMMON))
+               FileDelete(stalePingFile, FILE_COMMON);
+            hasHeartbeat = false;
+            pingLeaseId = "";
+            pingSymbol = "";
+            heartbeat = 0;
+            heartbeatMs = 0;
+            heartbeatChartId = 0;
+            heartbeatChartSymbol = "";
+            heartbeatSymbolsCsv = "";
+            heartbeatSignature = "";
+            heartbeatState = "";
+            signatureMatches = true;
+         }
          leaseMatches = true;
       }
       bool chartAlive = (heartbeatChartId > 0 && MBP_IsChartAlive(heartbeatChartId));
