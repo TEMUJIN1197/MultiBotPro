@@ -383,8 +383,6 @@ void BatchPrepareSyntheticCharts(const ENUM_MBP_DATA_MODE requestedMode)
 {
    if(!MBP_IsSyntheticDataMode(requestedMode))
       return;
-   if(IsParallelWorkerMode())
-      return;
 
    bool openedVisibleChart = false;
    for(int i = 0; i < ArraySize(SymbolData); i++)
