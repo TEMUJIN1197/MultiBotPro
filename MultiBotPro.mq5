@@ -1549,6 +1549,31 @@ long MBP_FindAssignedWorkerChart(const string symbol,
    if(targetBase == "")
       targetBase = symbol;
 
+   datetime heartbeat = 0;
+   long heartbeatChartId = 0;
+   string heartbeatSymbolsCsv = "";
+   string heartbeatSignature = "";
+   string heartbeatState = "";
+   if(MBP_ReadWorkerHeartbeat(symbol,
+                              coordinatorKey,
+                              heartbeat,
+                              heartbeatChartId,
+                              heartbeatSymbolsCsv,
+                              heartbeatSignature,
+                              heartbeatState))
+   {
+      bool heartbeatSignatureOk = (assignmentSignature == "" ||
+                                   heartbeatSignature == "" ||
+                                   StringCompare(heartbeatSignature, assignmentSignature, false) == 0);
+      if(heartbeatChartId > 0 &&
+         heartbeatChartId != excludedChartId &&
+         heartbeatSignatureOk &&
+         MBP_IsAssignedWorkerChart(heartbeatChartId, symbol, coordinatorKey, assignmentSignature))
+      {
+         return heartbeatChartId;
+      }
+   }
+
    long bestChartId = 0;
    int bestRank = -1;
    datetime bestAssignedAt = 0;
@@ -1600,7 +1625,7 @@ long MBP_FindAssignedWorkerChart(const string symbol,
                 {
                    if(bestChartId <= 0)
                       betterCandidate = true;
-                   else if(assignedAt > 0 && (bestAssignedAt <= 0 || assignedAt > bestAssignedAt))
+                   else if(assignedAt > 0 && (bestAssignedAt <= 0 || assignedAt < bestAssignedAt))
                       betterCandidate = true;
                 }
 
@@ -2751,23 +2776,43 @@ void MasterEnsureRuntimeWorkers()
          continue;
       }
 
-      long assignedChartId = MBP_FindAssignedWorkerChart(baseSymbol,
-                                                         coordinatorKey,
-                                                         G_WorkerSlots[i].assignmentSignature,
-                                                         ChartID());
-      bool assignedChartAlive = (assignedChartId > 0 &&
-                                 MBP_IsAssignedWorkerChart(assignedChartId,
-                                                           baseSymbol,
-                                                           coordinatorKey,
-                                                           G_WorkerSlots[i].assignmentSignature));
-
-      long targetChartId = assignedChartAlive ? assignedChartId : 0;
+      long targetChartId = 0;
       bool newlyAssigned = false;
+      bool templateRequired = false;
+
+      long trackedChartId = G_WorkerSlots[i].chartId;
+      if(trackedChartId > 0 && trackedChartId != ChartID() && MBP_IsChartAlive(trackedChartId))
+      {
+         string trackedChartSymbol = ChartSymbol(trackedChartId);
+         if(workerChartSymbol == "" || StringCompare(trackedChartSymbol, workerChartSymbol, false) == 0)
+            targetChartId = trackedChartId;
+      }
+
+      if(targetChartId <= 0)
+      {
+         long assignedChartId = MBP_FindAssignedWorkerChart(baseSymbol,
+                                                            coordinatorKey,
+                                                            G_WorkerSlots[i].assignmentSignature,
+                                                            ChartID());
+         if(assignedChartId > 0 && assignedChartId != ChartID() && MBP_IsChartAlive(assignedChartId))
+            targetChartId = assignedChartId;
+      }
+
+      if(targetChartId <= 0)
+      {
+         long reusableChartId = MBP_FindReusableChartBySymbol(workerChartSymbol, ChartID());
+         if(reusableChartId > 0 && MBP_IsChartAlive(reusableChartId))
+         {
+            targetChartId = reusableChartId;
+            templateRequired = true;
+         }
+      }
 
       if(targetChartId <= 0)
       {
          targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
          newlyAssigned = true;
+         templateRequired = true;
       }
 
       if(targetChartId <= 0 || targetChartId == ChartID())
@@ -2776,15 +2821,52 @@ void MasterEnsureRuntimeWorkers()
          continue;
       }
 
-      if(!MBP_WaitForChartTargetReady(targetChartId, workerChartSymbol))
+      if(newlyAssigned && !MBP_WaitForChartTargetReady(targetChartId, workerChartSymbol, 1500))
       {
-         Print(EmojiWarning(), " Worker chart target was not ready for ", baseSymbol, " on chart ", targetChartId, ".");
-         continue;
+         Print(EmojiWarning(), " Worker chart target is still settling for ", baseSymbol,
+               " on chart ", targetChartId, ". Keeping this chart assigned.");
       }
 
       ApplyChartStyles(targetChartId);
 
-      if(!MBP_WriteWorkerAssignment(targetChartId,
+      string targetAssignedSymbol = "";
+      string targetAssignedSymbolsCsv = "";
+      string targetAssignedChartSymbol = "";
+      string targetAssignedCoordinatorKey = "";
+      long targetAssignedCoordinatorChartId = 0;
+      string targetAssignedSignature = "";
+      datetime targetAssignedAt = 0;
+      bool targetHadAssignment = MBP_ReadWorkerAssignment(targetChartId,
+                                                          targetAssignedSymbol,
+                                                          targetAssignedSymbolsCsv,
+                                                          targetAssignedChartSymbol,
+                                                          targetAssignedCoordinatorKey,
+                                                          targetAssignedCoordinatorChartId,
+                                                          targetAssignedSignature,
+                                                          targetAssignedAt);
+      bool targetCoordinatorMatches = (targetHadAssignment &&
+                                       MBP_CoordinatorKeyMatchesRuntime(targetAssignedCoordinatorKey, coordinatorKey));
+      bool targetSignatureMatches = (targetHadAssignment &&
+                                     targetAssignedSignature != "" &&
+                                     StringCompare(targetAssignedSignature,
+                                                   G_WorkerSlots[i].assignmentSignature,
+                                                   false) == 0);
+      bool targetSymbolsMatch = (targetHadAssignment &&
+                                 StringCompare(targetAssignedSymbolsCsv,
+                                               G_WorkerSlots[i].symbolsCsv,
+                                               false) == 0);
+      bool targetChartSymbolMatches = (targetHadAssignment &&
+                                       StringCompare(targetAssignedChartSymbol,
+                                                     workerChartSymbol,
+                                                     false) == 0);
+      bool needsAssignmentStamp = (!targetHadAssignment ||
+                                   !targetCoordinatorMatches ||
+                                   !targetSignatureMatches ||
+                                   !targetSymbolsMatch ||
+                                   !targetChartSymbolMatches);
+
+      if(needsAssignmentStamp &&
+         !MBP_WriteWorkerAssignment(targetChartId,
                                     G_WorkerSlots[i].symbol,
                                     G_WorkerSlots[i].symbolsCsv,
                                     workerChartSymbol,
@@ -2795,10 +2877,9 @@ void MasterEnsureRuntimeWorkers()
          continue;
       }
 
-      MBP_WriteWorkerLaunchMarker(targetChartId);
-
-      if(!assignedChartAlive || newlyAssigned)
+      if(templateRequired)
       {
+         MBP_WriteWorkerLaunchMarker(targetChartId);
          if(!ChartApplyTemplate(targetChartId, templateName))
          {
             Print(EmojiWarning(), " Failed to apply worker template to ", baseSymbol, " on chart ", targetChartId);
@@ -2811,12 +2892,8 @@ void MasterEnsureRuntimeWorkers()
       }
 
       G_WorkerSlots[i].chartId = targetChartId;
-      G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
-      MBP_CloseDuplicateAssignedWorkerCharts(baseSymbol,
-                                             coordinatorKey,
-                                             G_WorkerSlots[i].assignmentSignature,
-                                             targetChartId,
-                                             ChartID());
+      if(newlyAssigned || templateRequired)
+         G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
 
       datetime heartbeat = 0;
       long heartbeatChartId = 0;
@@ -2830,12 +2907,19 @@ void MasterEnsureRuntimeWorkers()
                                                   heartbeatSymbolsCsv,
                                                   heartbeatSignature,
                                                   heartbeatState);
+      if(hasHeartbeat && heartbeatChartId > 0 && heartbeatChartId != targetChartId)
+         hasHeartbeat = false;
+      if(hasHeartbeat &&
+         heartbeatSignature != "" &&
+         StringCompare(heartbeatSignature, G_WorkerSlots[i].assignmentSignature, false) != 0)
+         hasHeartbeat = false;
       if(hasHeartbeat)
          G_WorkerSlots[i].lastHeartbeat = heartbeat;
 
       string loggedHeartbeatState = hasHeartbeat ? heartbeatState : "";
-      bool shouldLogAssignment = (!assignedChartAlive ||
-                                  newlyAssigned ||
+      bool shouldLogAssignment = (newlyAssigned ||
+                                  templateRequired ||
+                                  needsAssignmentStamp ||
                                   G_WorkerSlots[i].lastLoggedChartId != targetChartId ||
                                   StringCompare(G_WorkerSlots[i].lastLoggedHeartbeatState,
                                                 loggedHeartbeatState,
