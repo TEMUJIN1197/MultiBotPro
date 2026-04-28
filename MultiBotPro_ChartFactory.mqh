@@ -109,7 +109,7 @@ public:
       if(openChart)
          EnsureChartOpen(openAttempts);
       else
-         m_chartID = 0;
+         m_chartID = (ChartSymbol(0) == m_customSymbol) ? ChartID() : 0;
       BindChartToEngine();
       return true;
    }

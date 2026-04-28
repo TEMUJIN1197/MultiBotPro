@@ -424,15 +424,7 @@ bool WorkerShouldOpenDedicatedSyntheticChart(const string baseSymbol)
    if(!IsParallelWorkerMode())
       return true;
 
-   string workerPrimaryBase = G_RuntimeAssignedWorkerSymbol;
-   if(workerPrimaryBase == "")
-      workerPrimaryBase = GetBaseSymbol(G_RuntimeAssignedChartSymbol);
-   if(workerPrimaryBase == "")
-      workerPrimaryBase = GetBaseSymbol(_Symbol);
-   if(workerPrimaryBase == "")
-      workerPrimaryBase = baseSymbol;
-
-   return (StringCompare(workerPrimaryBase, baseSymbol, false) == 0);
+   return false;
 }
 
 bool PrepareSymbolStartupChart(int symbolIndex, ENUM_MBP_DATA_MODE requestedMode, string &analysisSymbol)

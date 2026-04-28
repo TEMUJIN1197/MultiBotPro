@@ -179,6 +179,8 @@ struct SMbpWorkerSlot
    long   chartId;
    ulong  lastLaunchAttemptMs;
    datetime lastHeartbeat;
+   long   lastLoggedChartId;
+   string lastLoggedHeartbeatState;
 };
 
 SMbpWorkerSlot G_WorkerSlots[];
@@ -1980,12 +1982,16 @@ void MBP_EnsureWorkerSlots()
          G_WorkerSlots[slotIndex].chartId = previousSlots[previousIndex].chartId;
          G_WorkerSlots[slotIndex].lastLaunchAttemptMs = previousSlots[previousIndex].lastLaunchAttemptMs;
          G_WorkerSlots[slotIndex].lastHeartbeat = previousSlots[previousIndex].lastHeartbeat;
+         G_WorkerSlots[slotIndex].lastLoggedChartId = previousSlots[previousIndex].lastLoggedChartId;
+         G_WorkerSlots[slotIndex].lastLoggedHeartbeatState = previousSlots[previousIndex].lastLoggedHeartbeatState;
       }
       else
       {
          G_WorkerSlots[slotIndex].chartId = 0;
          G_WorkerSlots[slotIndex].lastLaunchAttemptMs = 0;
          G_WorkerSlots[slotIndex].lastHeartbeat = 0;
+         G_WorkerSlots[slotIndex].lastLoggedChartId = 0;
+         G_WorkerSlots[slotIndex].lastLoggedHeartbeatState = "";
       }
    }
 }
@@ -2760,16 +2766,9 @@ void MasterEnsureRuntimeWorkers()
 
       if(targetChartId <= 0)
       {
-         targetChartId = MBP_FindReusableChartBySymbol(workerChartSymbol, ChartID());
-         if(targetChartId <= 0)
-         {
-            targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
-            newlyAssigned = true;
-         }
-      }
-
-      if(targetChartId <= 0)
          targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
+         newlyAssigned = true;
+      }
 
       if(targetChartId <= 0 || targetChartId == ChartID())
       {
@@ -2834,10 +2833,22 @@ void MasterEnsureRuntimeWorkers()
       if(hasHeartbeat)
          G_WorkerSlots[i].lastHeartbeat = heartbeat;
 
-      Print(EmojiBrain(), " Coordinator assigned worker slot ", i,
-            " to ", G_WorkerSlots[i].symbolsCsv,
-            " on chart ", targetChartId, " (", workerChartSymbol, ").",
-            hasHeartbeat ? (" Heartbeat=" + heartbeatState) : "");
+      string loggedHeartbeatState = hasHeartbeat ? heartbeatState : "";
+      bool shouldLogAssignment = (!assignedChartAlive ||
+                                  newlyAssigned ||
+                                  G_WorkerSlots[i].lastLoggedChartId != targetChartId ||
+                                  StringCompare(G_WorkerSlots[i].lastLoggedHeartbeatState,
+                                                loggedHeartbeatState,
+                                                false) != 0);
+      if(shouldLogAssignment)
+      {
+         Print(EmojiBrain(), " Coordinator assigned worker slot ", i,
+               " to ", G_WorkerSlots[i].symbolsCsv,
+               " on chart ", targetChartId, " (", workerChartSymbol, ").",
+               hasHeartbeat ? (" Heartbeat=" + heartbeatState) : "");
+         G_WorkerSlots[i].lastLoggedChartId = targetChartId;
+         G_WorkerSlots[i].lastLoggedHeartbeatState = loggedHeartbeatState;
+      }
    }
 }
 
