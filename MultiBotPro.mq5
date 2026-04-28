@@ -183,6 +183,8 @@ struct SMbpWorkerSlot
    int    assignedCount;
    long   chartId;
    ulong  lastLaunchAttemptMs;
+   ulong  firstLaunchAttemptMs;
+   ulong  launchCooldownUntilMs;
    ulong  lastStaleHeartbeatWarnMs;
    ulong  lastReplaceCloseAttemptMs;
    int    missedHeartbeats;
@@ -2481,6 +2483,8 @@ void MBP_EnsureWorkerSlots()
             G_WorkerSlots[slotIndex].leaseId = "";
          G_WorkerSlots[slotIndex].chartId = previousSlots[previousIndex].chartId;
          G_WorkerSlots[slotIndex].lastLaunchAttemptMs = previousSlots[previousIndex].lastLaunchAttemptMs;
+         G_WorkerSlots[slotIndex].firstLaunchAttemptMs = previousSlots[previousIndex].firstLaunchAttemptMs;
+         G_WorkerSlots[slotIndex].launchCooldownUntilMs = previousSlots[previousIndex].launchCooldownUntilMs;
          G_WorkerSlots[slotIndex].lastStaleHeartbeatWarnMs = previousSlots[previousIndex].lastStaleHeartbeatWarnMs;
          G_WorkerSlots[slotIndex].lastReplaceCloseAttemptMs = previousSlots[previousIndex].lastReplaceCloseAttemptMs;
          G_WorkerSlots[slotIndex].missedHeartbeats = previousSlots[previousIndex].missedHeartbeats;
@@ -2492,6 +2496,8 @@ void MBP_EnsureWorkerSlots()
          G_WorkerSlots[slotIndex].leaseId = "";
          G_WorkerSlots[slotIndex].chartId = 0;
          G_WorkerSlots[slotIndex].lastLaunchAttemptMs = 0;
+         G_WorkerSlots[slotIndex].firstLaunchAttemptMs = 0;
+         G_WorkerSlots[slotIndex].launchCooldownUntilMs = 0;
          G_WorkerSlots[slotIndex].lastStaleHeartbeatWarnMs = 0;
          G_WorkerSlots[slotIndex].lastReplaceCloseAttemptMs = 0;
          G_WorkerSlots[slotIndex].missedHeartbeats = 0;
@@ -3475,8 +3481,8 @@ void MasterPublishWorkerHeartbeat(const bool enforceChartSymbol = true)
    if(!IsParallelWorkerMode())
       return;
 
-   if(enforceChartSymbol && !MBP_EnforceWorkerChartSymbol())
-      return;
+   if(enforceChartSymbol)
+      MBP_EnforceWorkerChartSymbol();
 
    ulong nowMs = GetTickCount();
    uint heartbeatIntervalMs = (uint)MathMax(100, InpParallelWorkerHeartbeatMs);
@@ -3548,6 +3554,8 @@ void MasterPublishWorkerHeartbeat(const bool enforceChartSymbol = true)
       return;
 
    G_LastWorkerHeartbeatPublishMs = nowMs;
+
+   // Stale workers must stay visible while the lease grace timer decides removal.
 }
 
 void MasterPumpWorkerSupervisorPriority()
@@ -3590,11 +3598,13 @@ void MasterEnsureRuntimeWorkers()
    if(!MasterSaveWorkerTemplate(false))
       return;
 
-   ulong heartbeatTtlMs = (ulong)MathMax(3000, heartbeatIntervalMs * (missedLimit + 2));
+   ulong heartbeatTtlMs = (ulong)MathMax(15000, heartbeatIntervalMs * (missedLimit + 2));
    ulong bootingTtlMs = (ulong)MathMax(90000, heartbeatIntervalMs * 600);
-   ulong relaunchGraceMs = (ulong)MathMax(2000, heartbeatIntervalMs * missedLimit);
-   ulong initialAttachGraceMs = (ulong)MathMax(10000, heartbeatIntervalMs * 50);
+   ulong relaunchGraceMs = (ulong)MathMax(30000, heartbeatIntervalMs * missedLimit * 10);
+   ulong initialAttachGraceMs = (ulong)MathMax(30000, heartbeatIntervalMs * 50);
    ulong staleHeartbeatWarnMs = (ulong)MathMax(10000, heartbeatIntervalMs * 100);
+   const ulong relaunchCooldownMs = 15000;
+   const int recentSlotAssignmentGraceSec = 60;
    string templateName = MBP_WorkerTemplateName();
    ENUM_TIMEFRAMES targetPeriod = (ENUM_TIMEFRAMES)ChartPeriod(0);
    string coordinatorKey = MBP_GetActiveCoordinatorKey();
@@ -3874,6 +3884,8 @@ void MasterEnsureRuntimeWorkers()
          G_WorkerSlots[i].reattachAttempted = false;
          G_WorkerSlots[i].missedHeartbeats = 0;
          G_WorkerSlots[i].lastReplaceCloseAttemptMs = 0;
+         G_WorkerSlots[i].firstLaunchAttemptMs = 0;
+         G_WorkerSlots[i].launchCooldownUntilMs = 0;
          if(G_WorkerSlots[i].leaseId == "" && pingLeaseId != "")
             G_WorkerSlots[i].leaseId = pingLeaseId;
          MBP_WriteWorkerSlotRecord(slotId,
@@ -3937,7 +3949,11 @@ void MasterEnsureRuntimeWorkers()
                                   G_WorkerSlots[i].lastHeartbeat > 0);
          bool neverHeartbeated = !hasEverHeartbeat;
          if(neverHeartbeated && G_WorkerSlots[i].lastLaunchAttemptMs == 0)
+         {
             G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+               G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
+         }
 
          bool initialAttachGraceActive = (neverHeartbeated &&
                                           G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
@@ -3998,6 +4014,8 @@ void MasterEnsureRuntimeWorkers()
          if(ChartClose(liveChartId))
          {
             G_WorkerSlots[i].lastReplaceCloseAttemptMs = nowMs;
+            G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
             G_WorkerSlots[i].missedHeartbeats = 0;
             G_WorkerSlots[i].lastHeartbeat = 0;
             Print(EmojiWarning(), " Worker replacement requested for slot ", slotId, " (", G_WorkerSlots[i].symbolsCsv, ")",
@@ -4010,16 +4028,33 @@ void MasterEnsureRuntimeWorkers()
                   ": failed to close stale chart ", liveChartId,
                   " Error=", _LastError);
             G_WorkerSlots[i].lastReplaceCloseAttemptMs = nowMs;
+            G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
          }
          continue;
       }
 
       long targetChartId = 0;
       bool targetIsAssignedChart = false;
-      bool launchGraceActive = (G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
-                                (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs);
-      if(launchGraceActive)
+      bool recentSlotAssignmentActive = (desiredSlotFresh &&
+                                         desiredAgeSec <= recentSlotAssignmentGraceSec &&
+                                         (StringCompare(desiredState, "LAUNCHING", false) == 0 ||
+                                          StringCompare(desiredState, "BOOTING", false) == 0 ||
+                                          StringCompare(desiredState, "ASSIGNED", false) == 0 ||
+                                          StringCompare(desiredState, "RUNNING", false) == 0));
+      bool launchGraceActive = ((G_WorkerSlots[i].firstLaunchAttemptMs > 0 &&
+                                 (nowMs - G_WorkerSlots[i].firstLaunchAttemptMs) < relaunchGraceMs) ||
+                                (G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
+                                 (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs));
+      bool launchCooldownActive = (G_WorkerSlots[i].launchCooldownUntilMs > nowMs);
+      if(recentSlotAssignmentActive || launchGraceActive || launchCooldownActive)
+      {
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
+         if(G_WorkerSlots[i].lastLaunchAttemptMs == 0)
+            G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
          continue;
+      }
 
       G_WorkerSlots[i].leaseId = MBP_BuildWorkerLeaseId(coordinatorKey,
                                                         slotId,
@@ -4036,6 +4071,7 @@ void MasterEnsureRuntimeWorkers()
          {
             G_WorkerSlots[i].lastReplaceCloseAttemptMs = nowMs;
             G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
             Print(EmojiWarning(), " Worker launch delayed for slot ", slotId,
                   " (", G_WorkerSlots[i].symbolsCsv,
                   "): closed stale assigned chart ", staleChartId,
@@ -4048,6 +4084,7 @@ void MasterEnsureRuntimeWorkers()
                   "): failed to close stale assigned chart ", staleChartId,
                   " Error=", _LastError);
             G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
          }
          continue;
       }
@@ -4068,7 +4105,10 @@ void MasterEnsureRuntimeWorkers()
       if(targetChartId <= 0 || targetChartId == ChartID())
       {
          Print(EmojiWarning(), " Worker launch skipped for ", baseSymbol, " because no safe chart target was available.");
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
          continue;
       }
 
@@ -4076,7 +4116,10 @@ void MasterEnsureRuntimeWorkers()
       if(!MBP_WaitForChartTargetReady(targetChartId, expectedReadySymbol))
       {
          Print(EmojiWarning(), " Worker chart target was not ready for ", baseSymbol, " on chart ", targetChartId, ".");
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
          continue;
       }
 
@@ -4093,7 +4136,10 @@ void MasterEnsureRuntimeWorkers()
       {
          Print(EmojiWarning(), " Failed to stamp worker assignment for slot ", slotId,
                " (", G_WorkerSlots[i].symbolsCsv, ") on chart ", targetChartId);
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
          continue;
       }
 
@@ -4117,12 +4163,18 @@ void MasterEnsureRuntimeWorkers()
          string legacyAssignmentFile = MBP_LegacyWorkerAssignmentFile(targetChartId);
          if(FileIsExist(legacyAssignmentFile, FILE_COMMON))
             FileDelete(legacyAssignmentFile, FILE_COMMON);
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
          continue;
       }
 
       G_WorkerSlots[i].chartId = targetChartId;
+      if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+         G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
       G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+      G_WorkerSlots[i].launchCooldownUntilMs = nowMs + relaunchCooldownMs;
       G_WorkerSlots[i].lastStaleHeartbeatWarnMs = 0;
       G_WorkerSlots[i].lastReplaceCloseAttemptMs = 0;
       G_WorkerSlots[i].missedHeartbeats = 0;
@@ -6249,8 +6301,13 @@ void Master_OnTick()
 {
    if(G_IS_DEINIT || IsStopped()) return;
    if(!G_LicenseValid) return;
-   if(IsParallelWorkerMode() && !MBP_EnforceWorkerChartSymbol()) return;
-   if(IsParallelWorkerMode()) MasterPublishWorkerHeartbeat();
+   if(IsParallelWorkerMode())
+   {
+      bool workerReady = MBP_EnforceWorkerChartSymbol();
+      MasterPublishWorkerHeartbeat(false);
+      if(!workerReady)
+         return;
+   }
 
    ulong tickStartMs = GetTickCount();
    bool uiPanelActive = (ShowManualSection || ShowTradeList || Panel_IsModifying ||
