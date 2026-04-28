@@ -1238,7 +1238,6 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
 
    if(UseLargeDirectLiveMode())
    {
-      DeleteLivePreviewOverlay();
       double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
       if(point <= 0.0)
          point = _Point;
@@ -1246,6 +1245,7 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
       double ask = (sourceAsk > bid) ? NormalizePrice(sourceAsk) : NormalizePrice(bid + point);
       UpdateCustomQuoteFields(bid, ask);
       DeletePublishedLivePreviewRate();
+      DrawLivePreviewOverlay();
       RefreshChartHandle();
       if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
          ChartRedraw(m_chartID);
@@ -1479,7 +1479,7 @@ color CRenkoEngine::ResolveLivePreviewColor(const long chartId, const bool bulli
 
 void CRenkoEngine::DrawLivePreviewOverlay()
 {
-   if(!UseSmallPhantomLiveMode())
+   if(!UseSmallPhantomLiveMode() && !UseLargeDirectLiveMode())
       return;
 
    long chartId = ChartFirst();
