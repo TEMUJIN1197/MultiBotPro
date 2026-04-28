@@ -1345,6 +1345,39 @@ string MBP_WorkerHeartbeatFile(const string symbol, const string coordinatorKey 
                        MBP_SanitizeRuntimeToken(symbol));
 }
 
+string MBP_WorkerHeartbeatGlobalBase(const string symbol, const string coordinatorKey = "")
+{
+   string activeKey = coordinatorKey;
+   if(activeKey == "")
+      activeKey = MBP_GetActiveCoordinatorKey();
+
+   return StringFormat("MBP_WH_%s_%s",
+                       MBP_SanitizeRuntimeToken(activeKey),
+                       MBP_SanitizeRuntimeToken(symbol));
+}
+
+int MBP_WorkerHeartbeatStateCode(const string state)
+{
+   if(StringCompare(state, "RUNNING", false) == 0)
+      return 1;
+   if(StringCompare(state, "RELOADING", false) == 0)
+      return 2;
+   if(StringCompare(state, "STOPPED", false) == 0)
+      return 3;
+   return 0;
+}
+
+string MBP_WorkerHeartbeatStateFromCode(const int stateCode)
+{
+   if(stateCode == 1)
+      return "RUNNING";
+   if(stateCode == 2)
+      return "RELOADING";
+   if(stateCode == 3)
+      return "STOPPED";
+   return "BOOTING";
+}
+
 string MBP_ReadTextFileCommon(const string fileName)
 {
    int handle = FileOpen(fileName, FILE_READ|FILE_BIN|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
@@ -1430,9 +1463,26 @@ bool MBP_WriteWorkerHeartbeatRecord(const string workerSymbol,
    if(workerSymbol == "" || chartId <= 0)
       return false;
 
+   datetime effectiveHeartbeat = (heartbeatTime > 0) ? heartbeatTime : TimeCurrent();
+   string globalBase = MBP_WorkerHeartbeatGlobalBase(workerSymbol, coordinatorKey);
+   bool globalPublished = (GlobalVariableSet(globalBase + "_ts", (double)effectiveHeartbeat) != 0);
+   GlobalVariableSet(globalBase + "_chart", (double)chartId);
+   GlobalVariableSet(globalBase + "_state", (double)MBP_WorkerHeartbeatStateCode(state));
+
    int handle = FileOpen(MBP_WorkerHeartbeatFile(workerSymbol, coordinatorKey), FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
    if(handle == INVALID_HANDLE)
-      return false;
+   {
+      static ulong lastHeartbeatWriteFailLogMs = 0;
+      ulong nowMs = GetTickCount();
+      if(lastHeartbeatWriteFailLogMs == 0 || (nowMs - lastHeartbeatWriteFailLogMs) >= 10000)
+      {
+         Print(EmojiWarning(), " Worker heartbeat file write failed for ", workerSymbol,
+               " key=", coordinatorKey, " Error=", _LastError,
+               ". Global heartbeat fallback is ", (globalPublished ? "active" : "unavailable"), ".");
+         lastHeartbeatWriteFailLogMs = nowMs;
+      }
+      return globalPublished;
+   }
 
    FileWriteString(handle, "symbol=" + workerSymbol + "\r\n");
    if(assignedChartSymbol != "")
@@ -1442,7 +1492,7 @@ bool MBP_WriteWorkerHeartbeatRecord(const string workerSymbol,
    if(assignmentSignature != "")
       FileWriteString(handle, "signature=" + assignmentSignature + "\r\n");
    FileWriteString(handle, StringFormat("chart_id=%I64d\r\n", chartId));
-   FileWriteString(handle, "heartbeat=" + IntegerToString((int)((heartbeatTime > 0) ? heartbeatTime : TimeCurrent())) + "\r\n");
+   FileWriteString(handle, "heartbeat=" + IntegerToString((int)effectiveHeartbeat) + "\r\n");
    FileWriteString(handle, "state=" + state + "\r\n");
    FileWriteString(handle, "positions=" + IntegerToString(MathMax(0, linkedPositions)) + "\r\n");
    FileWriteString(handle, "role=WORKER\r\n");
@@ -2023,20 +2073,53 @@ bool MBP_ReadWorkerHeartbeat(const string symbol,
    outAssignmentSignature = "";
    outState = "";
 
+   datetime fileHeartbeat = 0;
+   long fileChartId = 0;
+   string fileSymbolsCsv = "";
+   string fileAssignmentSignature = "";
+   string fileState = "";
    string payload = MBP_ReadTextFileCommon(MBP_WorkerHeartbeatFile(symbol, coordinatorKey));
-   if(payload == "")
-      return false;
+   if(payload != "")
+   {
+      string heartbeatValue = MBP_ReadKeyValue(payload, "heartbeat");
+      string chartIdValue = MBP_ReadKeyValue(payload, "chart_id");
+      if(heartbeatValue != "" && chartIdValue != "")
+      {
+         fileHeartbeat = (datetime)StringToInteger(heartbeatValue);
+         fileChartId = (long)StringToInteger(chartIdValue);
+         fileSymbolsCsv = MBP_ReadKeyValue(payload, "symbols");
+         fileAssignmentSignature = MBP_ReadKeyValue(payload, "signature");
+         fileState = MBP_ReadKeyValue(payload, "state");
+      }
+   }
 
-   string heartbeatValue = MBP_ReadKeyValue(payload, "heartbeat");
-   string chartIdValue = MBP_ReadKeyValue(payload, "chart_id");
-   if(heartbeatValue == "" || chartIdValue == "")
-      return false;
+   string globalBase = MBP_WorkerHeartbeatGlobalBase(symbol, coordinatorKey);
+   datetime globalHeartbeat = 0;
+   long globalChartId = 0;
+   string globalState = "";
+   if(GlobalVariableCheck(globalBase + "_ts") && GlobalVariableCheck(globalBase + "_chart"))
+   {
+      globalHeartbeat = (datetime)(long)GlobalVariableGet(globalBase + "_ts");
+      globalChartId = (long)GlobalVariableGet(globalBase + "_chart");
+      int stateCode = GlobalVariableCheck(globalBase + "_state") ? (int)GlobalVariableGet(globalBase + "_state") : 0;
+      globalState = MBP_WorkerHeartbeatStateFromCode(stateCode);
+   }
 
-   outHeartbeat = (datetime)StringToInteger(heartbeatValue);
-   outChartId = (long)StringToInteger(chartIdValue);
-   outSymbolsCsv = MBP_ReadKeyValue(payload, "symbols");
-   outAssignmentSignature = MBP_ReadKeyValue(payload, "signature");
-   outState = MBP_ReadKeyValue(payload, "state");
+   bool useGlobal = (globalHeartbeat > 0 && globalChartId > 0 &&
+                     (fileHeartbeat <= 0 || globalHeartbeat >= fileHeartbeat));
+   if(useGlobal)
+   {
+      outHeartbeat = globalHeartbeat;
+      outChartId = globalChartId;
+      outState = globalState;
+      return true;
+   }
+
+   outHeartbeat = fileHeartbeat;
+   outChartId = fileChartId;
+   outSymbolsCsv = fileSymbolsCsv;
+   outAssignmentSignature = fileAssignmentSignature;
+   outState = fileState;
    return (outHeartbeat > 0 && outChartId > 0);
 }
 
