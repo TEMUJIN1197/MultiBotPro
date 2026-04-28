@@ -178,6 +178,8 @@ struct SMbpWorkerSlot
    int    assignedCount;
    long   chartId;
    ulong  lastLaunchAttemptMs;
+   ulong  firstLaunchAttemptMs;
+   ulong  launchCooldownUntilMs;
    datetime lastHeartbeat;
 };
 
@@ -1219,9 +1221,14 @@ string MBP_GetTerminalFilesPath()
 
 string MBP_DefaultCoordinatorKey()
 {
-   return StringFormat("%s_%I64d",
+   string serverName = AccountInfoString(ACCOUNT_SERVER);
+   if(serverName == "")
+      serverName = TerminalInfoString(TERMINAL_COMPANY);
+
+   return StringFormat("%s_%I64d_%s",
                        MBP_SanitizeRuntimeToken(InpHedgeChannel),
-                       ChartID());
+                       (long)AccountInfoInteger(ACCOUNT_LOGIN),
+                       MBP_SanitizeRuntimeToken(serverName));
 }
 
 string MBP_GetActiveCoordinatorKey()
@@ -1230,6 +1237,18 @@ string MBP_GetActiveCoordinatorKey()
       return G_RuntimeCoordinatorKey;
 
    return MBP_DefaultCoordinatorKey();
+}
+
+bool MBP_CoordinatorKeyMatchesRuntime(const string assignedKey, const string activeKey)
+{
+   if(activeKey == "" || assignedKey == "")
+      return true;
+   if(StringCompare(assignedKey, activeKey, false) == 0)
+      return true;
+
+   string channelPrefix = MBP_SanitizeRuntimeToken(InpHedgeChannel) + "_";
+   return (StringFind(assignedKey, channelPrefix) == 0 &&
+           StringFind(activeKey, channelPrefix) == 0);
 }
 
 string ShadowMaster_GetRuntimeConfigPath()
@@ -1453,9 +1472,7 @@ long MBP_FindAssignedWorkerChart(const string symbol,
             if(assignedBase == "")
                assignedBase = assignedSymbol;
 
-            bool coordinatorMatches = (coordinatorKey == "" ||
-                                       assignedCoordinatorKey == "" ||
-                                       StringCompare(assignedCoordinatorKey, coordinatorKey, false) == 0);
+            bool coordinatorMatches = MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey);
             int rank = -1;
             if(coordinatorMatches && assignmentSignature != "" &&
                assignedSignature != "" &&
@@ -1477,7 +1494,7 @@ long MBP_FindAssignedWorkerChart(const string symbol,
                 {
                    if(bestChartId <= 0)
                       betterCandidate = true;
-                   else if(assignedAt > 0 && (bestAssignedAt <= 0 || assignedAt < bestAssignedAt))
+                   else if(assignedAt > 0 && (bestAssignedAt <= 0 || assignedAt > bestAssignedAt))
                       betterCandidate = true;
                 }
 
@@ -1529,9 +1546,7 @@ int MBP_CloseDuplicateAssignedWorkerCharts(const string symbol,
                                      assignedSignature,
                                      assignedAt))
          {
-            bool coordinatorMatches = (coordinatorKey == "" ||
-                                       assignedCoordinatorKey == "" ||
-                                       StringCompare(assignedCoordinatorKey, coordinatorKey, false) == 0);
+            bool coordinatorMatches = MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey);
             bool sameAssignment = (assignedSignature != "" &&
                                    StringCompare(assignedSignature, assignmentSignature, false) == 0);
             if(coordinatorMatches && sameAssignment)
@@ -1555,8 +1570,21 @@ int MBP_CloseDuplicateAssignedWorkerCharts(const string symbol,
                }
                else
                {
-                  Print(EmojiWarning(), " Duplicate worker chart close failed for ", symbol,
-                        " on chart ", chartId, " Error=", _LastError);
+                  int closeError = _LastError;
+                  if(closeError == 4102)
+                  {
+                     string assignmentFile = MBP_WorkerAssignmentFile(chartId);
+                     if(FileIsExist(assignmentFile, FILE_COMMON))
+                        FileDelete(assignmentFile, FILE_COMMON);
+                     closed++;
+                     Print(EmojiWarning(), " Cleared stale duplicate worker assignment for ", symbol,
+                           " on missing chart ", chartId, ".");
+                  }
+                  else
+                  {
+                     Print(EmojiWarning(), " Duplicate worker chart close failed for ", symbol,
+                           " on chart ", chartId, " Error=", closeError);
+                  }
                }
             }
          }
@@ -1595,9 +1623,7 @@ bool MBP_IsAssignedWorkerChart(const long chartId,
       return false;
    }
 
-   bool coordinatorMatches = (coordinatorKey == "" ||
-                              assignedCoordinatorKey == "" ||
-                              StringCompare(assignedCoordinatorKey, coordinatorKey, false) == 0);
+   bool coordinatorMatches = MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey);
    if(!coordinatorMatches)
       return false;
 
@@ -1849,12 +1875,16 @@ void MBP_EnsureWorkerSlots()
       {
          G_WorkerSlots[slotIndex].chartId = previousSlots[previousIndex].chartId;
          G_WorkerSlots[slotIndex].lastLaunchAttemptMs = previousSlots[previousIndex].lastLaunchAttemptMs;
+         G_WorkerSlots[slotIndex].firstLaunchAttemptMs = previousSlots[previousIndex].firstLaunchAttemptMs;
+         G_WorkerSlots[slotIndex].launchCooldownUntilMs = previousSlots[previousIndex].launchCooldownUntilMs;
          G_WorkerSlots[slotIndex].lastHeartbeat = previousSlots[previousIndex].lastHeartbeat;
       }
       else
       {
          G_WorkerSlots[slotIndex].chartId = 0;
          G_WorkerSlots[slotIndex].lastLaunchAttemptMs = 0;
+         G_WorkerSlots[slotIndex].firstLaunchAttemptMs = 0;
+         G_WorkerSlots[slotIndex].launchCooldownUntilMs = 0;
          G_WorkerSlots[slotIndex].lastHeartbeat = 0;
       }
    }
@@ -1954,6 +1984,91 @@ bool MBP_ReadWorkerHeartbeat(const string symbol,
    return (outHeartbeat > 0 && outChartId > 0);
 }
 
+bool MBP_FindRecentWorkerAssignment(const string symbol,
+                                    const string coordinatorKey,
+                                    const string assignmentSignature,
+                                    const int maxAgeSec,
+                                    long &outChartId,
+                                    datetime &outAssignedAt,
+                                    bool &outChartAlive)
+{
+   outChartId = 0;
+   outAssignedAt = 0;
+   outChartAlive = false;
+
+   string fileName = "";
+   string filter = "MBP_WorkerAssign_" + MBP_SanitizeRuntimeToken(InpHedgeChannel) + "_*.txt";
+   long finder = FileFindFirst(filter, fileName, FILE_COMMON);
+   if(finder == INVALID_HANDLE)
+      return false;
+
+   datetime newestAssignedAt = 0;
+   long newestChartId = 0;
+   bool newestChartAlive = false;
+   datetime nowTime = TimeCurrent();
+
+   do
+   {
+      string payload = MBP_ReadTextFileCommon(fileName);
+      if(payload == "")
+         continue;
+
+      string assignedSymbol = MBP_ReadKeyValue(payload, "symbol");
+      string assignedSymbolsCsv = MBP_ReadKeyValue(payload, "symbols");
+      string assignedChartSymbol = MBP_ReadKeyValue(payload, "chart_symbol");
+      string assignedSignature = MBP_ReadKeyValue(payload, "signature");
+      string assignedCoordinatorKey = MBP_ReadKeyValue(payload, "coordinator_key");
+      string assignedAtValue = MBP_ReadKeyValue(payload, "assigned_at");
+      string chartIdValue = MBP_ReadKeyValue(payload, "chart_id");
+      if(assignedAtValue == "" || chartIdValue == "")
+         continue;
+
+      if(assignedSignature == "")
+         assignedSignature = MBP_BuildWorkerAssignmentSignature(assignedSymbol, assignedChartSymbol, assignedSymbolsCsv);
+
+      bool sameAssignment = (assignmentSignature != "" &&
+                             assignedSignature != "" &&
+                             StringCompare(assignedSignature, assignmentSignature, false) == 0);
+      if(!sameAssignment)
+      {
+         string targetBase = GetBaseSymbol(symbol);
+         if(targetBase == "")
+            targetBase = symbol;
+         string assignedBase = GetBaseSymbol(assignedSymbol);
+         if(assignedBase == "")
+            assignedBase = assignedSymbol;
+         sameAssignment = (targetBase != "" && StringCompare(targetBase, assignedBase, false) == 0);
+      }
+
+      if(!sameAssignment || !MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey))
+         continue;
+
+      datetime assignedAt = (datetime)StringToInteger(assignedAtValue);
+      if(assignedAt <= 0 || (nowTime - assignedAt) > maxAgeSec)
+         continue;
+
+      long chartId = (long)StringToInteger(chartIdValue);
+      bool chartAlive = MBP_IsChartAlive(chartId);
+      if(newestChartId <= 0 || assignedAt > newestAssignedAt)
+      {
+         newestChartId = chartId;
+         newestAssignedAt = assignedAt;
+         newestChartAlive = chartAlive;
+      }
+   }
+   while(FileFindNext(finder, fileName));
+
+   FileFindClose(finder);
+
+   if(newestChartId <= 0)
+      return false;
+
+   outChartId = newestChartId;
+   outAssignedAt = newestAssignedAt;
+   outChartAlive = newestChartAlive;
+   return true;
+}
+
 bool MBP_IsHeartbeatOwnedByChart(const string symbol,
                                  const string coordinatorKey,
                                  const string assignmentSignature,
@@ -1989,6 +2104,96 @@ bool MBP_IsHeartbeatOwnedByChart(const string symbol,
    }
 
    return true;
+}
+
+void MBP_EnforceWorkerLease()
+{
+   if(!IsParallelWorkerMode())
+      return;
+
+   static ulong staleLeaseStartedMs = 0;
+   static ulong lastStaleLeaseLogMs = 0;
+   ulong nowMs = GetTickCount();
+   const ulong staleLeaseGraceMs = 15000;
+   const ulong staleLeaseLogMs = 10000;
+
+   string assignedSymbol = "";
+   string assignedSymbolsCsv = "";
+   string assignedChartSymbol = "";
+   string assignedCoordinatorKey = "";
+   long assignedCoordinatorChartId = 0;
+   string assignedSignature = "";
+   datetime assignedAt = 0;
+   bool hasAssignment = MBP_ReadWorkerAssignment(ChartID(),
+                                                 assignedSymbol,
+                                                 assignedSymbolsCsv,
+                                                 assignedChartSymbol,
+                                                 assignedCoordinatorKey,
+                                                 assignedCoordinatorChartId,
+                                                 assignedSignature,
+                                                 assignedAt);
+
+   bool staleLease = !hasAssignment;
+   string staleReason = hasAssignment ? "" : "assignment file missing";
+   if(hasAssignment)
+   {
+      if(!MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, G_RuntimeCoordinatorKey))
+      {
+         staleLease = true;
+         staleReason = "coordinator key changed";
+      }
+      else if(G_RuntimeAssignedWorkerSignature != "" &&
+              assignedSignature != "" &&
+              StringCompare(assignedSignature, G_RuntimeAssignedWorkerSignature, false) != 0)
+      {
+         staleLease = true;
+         staleReason = "assignment signature changed";
+      }
+      else
+      {
+         long newestChartId = 0;
+         datetime newestAssignedAt = 0;
+         bool newestChartAlive = false;
+         if(MBP_FindRecentWorkerAssignment(MBP_GetAssignedWorkerHeartbeatSymbol(),
+                                           G_RuntimeCoordinatorKey,
+                                           (G_RuntimeAssignedWorkerSignature != "" ? G_RuntimeAssignedWorkerSignature : assignedSignature),
+                                           300,
+                                           newestChartId,
+                                           newestAssignedAt,
+                                           newestChartAlive) &&
+            newestChartAlive &&
+            newestChartId > 0 &&
+            newestChartId != ChartID() &&
+            newestAssignedAt >= assignedAt)
+         {
+            staleLease = true;
+            staleReason = "newer worker assignment owns this slot";
+         }
+      }
+   }
+
+   if(!staleLease)
+   {
+      staleLeaseStartedMs = 0;
+      return;
+   }
+
+   if(staleLeaseStartedMs == 0)
+      staleLeaseStartedMs = nowMs;
+
+   if(lastStaleLeaseLogMs == 0 || (nowMs - lastStaleLeaseLogMs) >= staleLeaseLogMs)
+   {
+      Print(EmojiWarning(), " Worker lease is stale on chart ", ChartID(),
+            " (", staleReason, "). Heartbeat continues during grace; worker will remove itself if not reclaimed.");
+      lastStaleLeaseLogMs = nowMs;
+   }
+
+   if((nowMs - staleLeaseStartedMs) >= staleLeaseGraceMs)
+   {
+      Print(EmojiWarning(), " Worker lease remained stale on chart ", ChartID(),
+            ". Removing EA so the coordinator can keep one active worker.");
+      ExpertRemove();
+   }
 }
 
 ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
@@ -2343,15 +2548,17 @@ void MasterPublishWorkerHeartbeat()
       assignmentSignature = MBP_BuildWorkerAssignmentSignature(workerSymbol, assignedChartSymbol, assignedSymbolsCsv);
    string runtimeState = G_WorkerBootstrapCompleted ? "RUNNING" : "BOOTING";
 
-   if(!MBP_WriteWorkerHeartbeatRecord(workerSymbol,
-                                      G_RuntimeCoordinatorKey,
-                                      assignedChartSymbol,
-                                      assignedSymbolsCsv,
-                                      assignmentSignature,
-                                      runtimeState,
-                                      linkedPositions,
-                                      TimeCurrent(),
-                                      ChartID()))
+   bool heartbeatPublished = MBP_WriteWorkerHeartbeatRecord(workerSymbol,
+                                                            G_RuntimeCoordinatorKey,
+                                                            assignedChartSymbol,
+                                                            assignedSymbolsCsv,
+                                                            assignmentSignature,
+                                                            runtimeState,
+                                                            linkedPositions,
+                                                            TimeCurrent(),
+                                                            ChartID());
+   MBP_EnforceWorkerLease();
+   if(!heartbeatPublished)
       return;
 
    G_LastWorkerHeartbeatPublishMs = nowMs;
@@ -2386,9 +2593,11 @@ void MasterEnsureRuntimeWorkers()
    if(!MasterSaveWorkerTemplate(false))
       return;
 
-   uint heartbeatTtlSec = (uint)MathMax(15, (MathMax(250, InpParallelWorkerHeartbeatMs) * 8 + 999) / 1000);
-   uint bootingTtlSec = (uint)MathMax(60, heartbeatTtlSec * 2);
-   ulong relaunchGraceMs = (ulong)MathMax(6000, MathMax(250, InpParallelWorkerHeartbeatMs) * 6);
+   uint heartbeatTtlSec = (uint)MathMax(30, (MathMax(250, InpParallelWorkerHeartbeatMs) * 15 + 999) / 1000);
+   uint bootingTtlSec = (uint)MathMax(120, heartbeatTtlSec * 3);
+   ulong relaunchGraceMs = (ulong)MathMax(30000, MathMax(250, InpParallelWorkerHeartbeatMs) * 30);
+   const ulong launchCooldownMs = 15000;
+   const int recentAssignmentGraceSec = 60;
    string templateName = MBP_WorkerTemplateName();
    ENUM_TIMEFRAMES targetPeriod = (ENUM_TIMEFRAMES)ChartPeriod(0);
    string coordinatorKey = MBP_GetActiveCoordinatorKey();
@@ -2475,6 +2684,8 @@ void MasterEnsureRuntimeWorkers()
       {
          G_WorkerSlots[i].chartId = heartbeatChartId;
          G_WorkerSlots[i].lastHeartbeat = heartbeat;
+         G_WorkerSlots[i].firstLaunchAttemptMs = 0;
+         G_WorkerSlots[i].launchCooldownUntilMs = 0;
          MBP_CloseDuplicateAssignedWorkerCharts(baseSymbol,
                                                 coordinatorKey,
                                                 G_WorkerSlots[i].assignmentSignature,
@@ -2500,6 +2711,22 @@ void MasterEnsureRuntimeWorkers()
       else if(assignedChartAlive)
          liveChartId = assignedChartId;
 
+      long recentAssignmentChartId = 0;
+      datetime recentAssignedAt = 0;
+      bool recentAssignmentChartAlive = false;
+      bool recentAssignmentActive = MBP_FindRecentWorkerAssignment(baseSymbol,
+                                                                   coordinatorKey,
+                                                                   G_WorkerSlots[i].assignmentSignature,
+                                                                   recentAssignmentGraceSec,
+                                                                   recentAssignmentChartId,
+                                                                   recentAssignedAt,
+                                                                   recentAssignmentChartAlive);
+      if(recentAssignmentActive && recentAssignmentChartAlive && liveChartId <= 0)
+      {
+         liveChartId = recentAssignmentChartId;
+         G_WorkerSlots[i].chartId = recentAssignmentChartId;
+      }
+
       if(liveChartId > 0)
       {
          G_WorkerSlots[i].chartId = liveChartId;
@@ -2512,11 +2739,14 @@ void MasterEnsureRuntimeWorkers()
 
       long targetChartId = 0;
       bool targetIsAssignedChart = false;
-      bool launchGraceActive = (G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
-                                (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs);
+      bool launchGraceActive = ((G_WorkerSlots[i].firstLaunchAttemptMs > 0 &&
+                                 (nowMs - G_WorkerSlots[i].firstLaunchAttemptMs) < relaunchGraceMs) ||
+                                (G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
+                                 (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < relaunchGraceMs));
+      bool launchCooldownActive = (G_WorkerSlots[i].launchCooldownUntilMs > nowMs);
       if(liveChartId > 0)
       {
-         if(launchGraceActive)
+         if(launchGraceActive || launchCooldownActive)
             continue;
 
          targetChartId = liveChartId;
@@ -2526,7 +2756,15 @@ void MasterEnsureRuntimeWorkers()
       }
       else
       {
-         if(launchGraceActive)
+         if(recentAssignmentActive)
+         {
+            if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+               G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
+            G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            continue;
+         }
+
+         if(launchGraceActive || launchCooldownActive)
             continue;
 
          targetChartId = MBP_FindReusableChartBySymbol(workerChartSymbol, ChartID());
@@ -2538,7 +2776,10 @@ void MasterEnsureRuntimeWorkers()
       if(targetChartId <= 0 || targetChartId == ChartID())
       {
          Print(EmojiWarning(), " Worker launch skipped for ", baseSymbol, " because no safe chart target was available.");
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + launchCooldownMs;
          continue;
       }
 
@@ -2546,7 +2787,10 @@ void MasterEnsureRuntimeWorkers()
       if(!MBP_WaitForChartTargetReady(targetChartId, expectedReadySymbol))
       {
          Print(EmojiWarning(), " Worker chart target was not ready for ", baseSymbol, " on chart ", targetChartId, ".");
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + launchCooldownMs;
          continue;
       }
 
@@ -2560,7 +2804,10 @@ void MasterEnsureRuntimeWorkers()
                                     G_WorkerSlots[i].assignmentSignature))
       {
          Print(EmojiWarning(), " Failed to stamp worker assignment for ", baseSymbol, " on chart ", targetChartId);
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + launchCooldownMs;
          continue;
       }
 
@@ -2570,12 +2817,18 @@ void MasterEnsureRuntimeWorkers()
          string assignmentFile = MBP_WorkerAssignmentFile(targetChartId);
          if(FileIsExist(assignmentFile, FILE_COMMON))
             FileDelete(assignmentFile, FILE_COMMON);
+         if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+            G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         G_WorkerSlots[i].launchCooldownUntilMs = nowMs + launchCooldownMs;
          continue;
       }
 
       G_WorkerSlots[i].chartId = targetChartId;
+      if(G_WorkerSlots[i].firstLaunchAttemptMs == 0)
+         G_WorkerSlots[i].firstLaunchAttemptMs = nowMs;
       G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+      G_WorkerSlots[i].launchCooldownUntilMs = nowMs + launchCooldownMs;
       MBP_CloseDuplicateAssignedWorkerCharts(baseSymbol,
                                              coordinatorKey,
                                              G_WorkerSlots[i].assignmentSignature,
