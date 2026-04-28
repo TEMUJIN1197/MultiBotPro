@@ -1251,6 +1251,62 @@ bool MBP_CoordinatorKeyMatchesRuntime(const string assignedKey, const string act
            StringFind(activeKey, channelPrefix) == 0);
 }
 
+string MBP_WorkerRoleTokenName(const long chartId)
+{
+   return StringFormat("MBP_WorkerToken_%I64d", chartId);
+}
+
+void MBP_WriteWorkerRoleToken(const long workerChartId)
+{
+   if(workerChartId <= 0)
+      return;
+
+   string tokenName = MBP_WorkerRoleTokenName(workerChartId);
+   GlobalVariableSet(tokenName, (double)ChartID());
+   GlobalVariableSet(tokenName + "_exp", (double)(TimeCurrent() + 120));
+}
+
+void MBP_ClearWorkerRoleToken(const long workerChartId)
+{
+   if(workerChartId <= 0)
+      return;
+
+   string tokenName = MBP_WorkerRoleTokenName(workerChartId);
+   if(GlobalVariableCheck(tokenName))
+      GlobalVariableDel(tokenName);
+   if(GlobalVariableCheck(tokenName + "_exp"))
+      GlobalVariableDel(tokenName + "_exp");
+}
+
+bool MBP_ConsumeWorkerRoleToken(const long workerChartId, double &coordinatorChartId)
+{
+   string tokenName = MBP_WorkerRoleTokenName(workerChartId);
+   if(!GlobalVariableCheck(tokenName))
+      return false;
+
+   coordinatorChartId = GlobalVariableGet(tokenName);
+   double expiry = GlobalVariableCheck(tokenName + "_exp") ? GlobalVariableGet(tokenName + "_exp") : 0.0;
+   if(coordinatorChartId <= 0.0 || expiry <= 0.0 || (double)TimeCurrent() >= expiry)
+   {
+      MBP_ClearWorkerRoleToken(workerChartId);
+      return false;
+   }
+
+   MBP_ClearWorkerRoleToken(workerChartId);
+   return true;
+}
+
+void MBP_PurgeWorkerRoleTokens()
+{
+   string prefix = "MBP_WorkerToken_";
+   for(int i = GlobalVariablesTotal() - 1; i >= 0; i--)
+   {
+      string name = GlobalVariableName(i);
+      if(StringFind(name, prefix) == 0)
+         GlobalVariableDel(name);
+   }
+}
+
 string ShadowMaster_GetRuntimeConfigPath()
 {
    return MBP_GetTerminalFilesPath() + "\\runtime_v3.json";
@@ -2259,6 +2315,33 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
       }
    }
 
+   double coordinatorChartId = 0.0;
+   if(MBP_ConsumeWorkerRoleToken(ChartID(), coordinatorChartId))
+   {
+      string currentChartSymbol = ChartSymbol(0);
+      string workerSymbol = GetBaseSymbol(currentChartSymbol);
+      if(workerSymbol == "")
+         workerSymbol = currentChartSymbol;
+
+      G_RuntimeCoordinatorKey = StringFormat("%s_%I64d",
+                                             MBP_SanitizeRuntimeToken(InpHedgeChannel),
+                                             (long)coordinatorChartId);
+      G_RuntimeAssignedWorkerSymbol = workerSymbol;
+      G_RuntimeAssignedChartSymbol = currentChartSymbol;
+      G_RuntimeAssignedSymbolsCsv = workerSymbol;
+      G_RuntimeAssignedWorkerSignature = MBP_BuildWorkerAssignmentSignature(workerSymbol,
+                                                                            currentChartSymbol,
+                                                                            workerSymbol);
+      if(workerSymbol != "")
+      {
+         ArrayResize(G_RuntimeAssignedSymbols, 1);
+         G_RuntimeAssignedSymbols[0] = workerSymbol;
+      }
+
+      Print("[RoleFallback] Assumed WORKER role via global token for chart ", ChartID());
+      return MBP_RUNTIME_WORKER;
+   }
+
    if(BotSystemMode != BOT_MODE_SLAVE)
    {
       G_RuntimeCoordinatorKey = MBP_DefaultCoordinatorKey();
@@ -2811,9 +2894,12 @@ void MasterEnsureRuntimeWorkers()
          continue;
       }
 
+      MBP_WriteWorkerRoleToken(targetChartId);
+
       if(!ChartApplyTemplate(targetChartId, templateName))
       {
          Print(EmojiWarning(), " Failed to apply worker template to ", baseSymbol, " on chart ", targetChartId);
+         MBP_ClearWorkerRoleToken(targetChartId);
          string assignmentFile = MBP_WorkerAssignmentFile(targetChartId);
          if(FileIsExist(assignmentFile, FILE_COMMON))
             FileDelete(assignmentFile, FILE_COMMON);
@@ -4396,6 +4482,9 @@ void Master_OnDeinit(const int reason)
          FileClose(hReinit);
       }
    }
+
+   if(IsParallelCoordinatorMode())
+      MBP_PurgeWorkerRoleTokens();
 
 // 2. Remove timer
    EventKillTimer();
