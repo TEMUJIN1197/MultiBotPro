@@ -31,6 +31,9 @@ extern "C" {
                                                            int applyOffsetToFirstBar, int offsetDigits, int resetOpenOnNewDay);
     MULTIBOTWORKER_API int __stdcall MBP_RenkoFeedRatesW(const wchar_t* sessionKey, const wchar_t* customSymbol,
                                                          const double* prices, const long long* timesMsc, int rateCount);
+    MULTIBOTWORKER_API int __stdcall MBP_RenkoFeedM1RatesW(const wchar_t* sessionKey, const wchar_t* customSymbol,
+                                                           const double* opens, const double* highs, const double* lows,
+                                                           const double* closes, const long long* timesMsc, int rateCount);
     MULTIBOTWORKER_API int __stdcall MBP_RenkoFeedTicksW(const wchar_t* sessionKey, const wchar_t* customSymbol,
                                                          const double* prices, const long long* timesMsc, int tickCount);
     MULTIBOTWORKER_API int __stdcall MBP_RenkoReadSnapshotW(const wchar_t* sessionKey, const wchar_t* customSymbol,

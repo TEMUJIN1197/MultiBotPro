@@ -862,6 +862,9 @@ struct RuntimeServiceManager
                              double openOffsetPct, double reversalShadowPct, double reversalPct,
                              int applyOffsetToFirstBar, int offsetDigits, int resetOpenOnNewDay);
    int MBP_RenkoFeedRatesW(string sessionKey, string customSymbol, const double &prices[], const long &timesMsc[], int rateCount);
+   int MBP_RenkoFeedM1RatesW(string sessionKey, string customSymbol,
+                             const double &opens[], const double &highs[], const double &lows[],
+                             const double &closes[], const long &timesMsc[], int rateCount);
    int MBP_RenkoFeedTicksW(string sessionKey, string customSymbol, const double &prices[], const long &timesMsc[], int tickCount);
    int MBP_RenkoReadSnapshotW(string sessionKey, string customSymbol, double &outDoubles[], long &outLongs[]);
    int MBP_RenkoGetHistoryInfoW(string sessionKey, string customSymbol, long &outLongs[]);

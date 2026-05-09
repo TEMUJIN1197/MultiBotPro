@@ -570,6 +570,47 @@ MULTIBOTWORKER_API int __stdcall MBP_RenkoFeedRatesW(const wchar_t* sessionKey, 
     return MBP_RenkoFeedTicksW(sessionKey, customSymbol, prices, timesMsc, rateCount);
 }
 
+MULTIBOTWORKER_API int __stdcall MBP_RenkoFeedM1RatesW(const wchar_t* sessionKey, const wchar_t* customSymbol,
+                                                       const double* opens, const double* highs, const double* lows,
+                                                       const double* closes, const long long* timesMsc, int rateCount)
+{
+    std::shared_ptr<Session> session = FindSession(sessionKey, customSymbol);
+    if(!session || !opens || !highs || !lows || !closes || !timesMsc || rateCount <= 0)
+        return 0;
+
+    int queued = 0;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        for(int i = 0; i < rateCount; ++i)
+        {
+            const double open = opens[i];
+            const double high = highs[i];
+            const double low = lows[i];
+            const double close = closes[i];
+            const long long baseTime = timesMsc[i];
+            if(open <= 0.0 || high <= 0.0 || low <= 0.0 || close <= 0.0 || baseTime <= 0)
+                continue;
+
+            session->queue.push_back({open, baseTime});
+            if(close >= open)
+            {
+                session->queue.push_back({low, baseTime + 20000LL});
+                session->queue.push_back({high, baseTime + 40000LL});
+            }
+            else
+            {
+                session->queue.push_back({high, baseTime + 20000LL});
+                session->queue.push_back({low, baseTime + 40000LL});
+            }
+            session->queue.push_back({close, baseTime + 59000LL});
+            queued += 4;
+        }
+    }
+    if(queued > 0)
+        session->cv.notify_one();
+    return queued;
+}
+
 MULTIBOTWORKER_API int __stdcall MBP_RenkoFeedTicksW(const wchar_t* sessionKey, const wchar_t* customSymbol,
                                                      const double* prices, const long long* timesMsc, int tickCount)
 {

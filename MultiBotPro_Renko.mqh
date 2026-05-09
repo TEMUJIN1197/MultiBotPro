@@ -468,7 +468,10 @@ void CRenkoEngine::ProcessTimer(const MqlTick &tick, const bool hasLiveTick)
       {
          double livePrice = (tick.bid > 0.0) ? tick.bid : tick.last;
          if(livePrice > 0.0)
+         {
+            RefreshLiveCandidateState(livePrice, tick.time, true);
             UpdateLiveBlock(livePrice, tick.time, tick.time_msc, m_lastSourceBid, m_lastSourceAsk, false);
+         }
       }
    }
 
@@ -736,6 +739,11 @@ bool CRenkoEngine::HasCleanRecentHistory()
       expectedBlock = point;
 
    double tolerance = MathMax(point * 2.0, expectedBlock * 0.02);
+   datetime newestTime = 0;
+   for(int j = 0; j < copied; j++)
+      if(rates[j].time > newestTime)
+         newestTime = rates[j].time;
+
    int checked = 0;
    for(int i = 0; i < copied - 1; i++)
    {
@@ -747,12 +755,17 @@ bool CRenkoEngine::HasCleanRecentHistory()
 
       double bodyHigh = MathMax(brickOpen, brickClose);
       double bodyLow = MathMin(brickOpen, brickClose);
-      if(MathAbs(body - expectedBlock) > tolerance)
+      bool bodyMismatch = (MathAbs(body - expectedBlock) > tolerance);
+      bool highMismatch = (MathAbs(NormalizePrice(rates[i].high) - bodyHigh) > tolerance);
+      bool lowMismatch = (MathAbs(NormalizePrice(rates[i].low) - bodyLow) > tolerance);
+      if(bodyMismatch || highMismatch || lowMismatch)
+      {
+         // The newest bar may be the live preview persisted by MT5. It is allowed
+         // to be partial; committed history behind it must still be fixed-size.
+         if(rates[i].time == newestTime)
+            continue;
          return false;
-      if(MathAbs(NormalizePrice(rates[i].high) - bodyHigh) > tolerance)
-         return false;
-      if(MathAbs(NormalizePrice(rates[i].low) - bodyLow) > tolerance)
-         return false;
+      }
       checked++;
    }
 
@@ -1238,23 +1251,7 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
       m_tickVolBuffer = 0;
    }
 
-   if(m_isReplayingHistory)
-   {
-      RefreshLiveCandidateState(normalizedPrice, tickTime, false);
-   }
-   else
-   {
-      if(m_liveLogicalStartTime <= 0)
-         m_liveLogicalStartTime = ResolveCandidateStartTime(tickTime);
-      if(m_brickStartTime <= 0)
-         m_brickStartTime = ResolvePublishedCandidateTime(m_liveLogicalStartTime);
-      m_liveBarOpen = NormalizePrice(m_anchorPrice);
-      m_liveCandidateActive = true;
-      m_liveCandidateIsReversal = false;
-      m_liveCandidateBullish = (normalizedPrice >= m_liveBarOpen);
-      m_liveCandidateTargetClose = 0.0;
-      m_liveCandidateClose = normalizedPrice;
-   }
+   RefreshLiveCandidateState(normalizedPrice, tickTime, false);
    if(tickTime > 0)
       m_livePreviewEndTime = tickTime;
 
@@ -1276,21 +1273,11 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
    double brickClose = NormalizePrice(close);
    double bodyHigh = MathMax(brickOpen, brickClose);
    double bodyLow = MathMin(brickOpen, brickClose);
-   double brickHigh = bodyHigh;
-   double brickLow = bodyLow;
-   if(m_showWicks)
-   {
-      brickHigh = MathMax(high, bodyHigh);
-      brickLow = MathMin(low, bodyLow);
-   }
-   // Guarantee MT5 OHLC validity regardless of floating-point rounding
-   brickHigh = MathMax(brickHigh, bodyHigh);
-   brickLow  = MathMin(brickLow,  bodyLow);
 
    m_ramRateBuffer[idx].time = startTime;
    m_ramRateBuffer[idx].open = brickOpen;
-   m_ramRateBuffer[idx].high = NormalizePrice(brickHigh);
-   m_ramRateBuffer[idx].low = NormalizePrice(brickLow);
+   m_ramRateBuffer[idx].high = NormalizePrice(bodyHigh);
+   m_ramRateBuffer[idx].low = NormalizePrice(bodyLow);
    m_ramRateBuffer[idx].close = brickClose;
    m_ramRateBuffer[idx].tick_volume = MathMax(1, volume);
    m_ramRateBuffer[idx].spread = 0;
@@ -1308,12 +1295,10 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
 
 void CRenkoEngine::BuildLiveBrick(double &brickOpen, double &brickClose, double &brickHigh, double &brickLow)
 {
-   // Live-only rendering intentionally mirrors the reference builders:
-   // `renko_small` phantom and `renko_large` direct preview both grow from the
-   // current anchor to the latest live price. History/commit geometry remains
-   // untouched in PushCompletedBrick().
+   // Live-only rendering uses the same one-brick candidate as the committed
+   // engine, so the preview never stretches beyond the current block.
    double liveOpen = (m_liveBarOpen > 0.0) ? m_liveBarOpen : ((m_anchorPrice > 0.0) ? m_anchorPrice : m_lastLivePrice);
-   double liveClose = (m_lastLivePrice > 0.0) ? m_lastLivePrice : liveOpen;
+   double liveClose = (m_liveCandidateClose > 0.0) ? m_liveCandidateClose : ((m_lastLivePrice > 0.0) ? m_lastLivePrice : liveOpen);
    brickOpen = NormalizePrice(liveOpen);
    brickClose = NormalizePrice(liveClose);
 
@@ -1704,6 +1689,13 @@ void CRenkoEngine::FlushRamToDisk(bool force)
       return;
 
    DeletePublishedLivePreviewRate();
+   for(int i = 0; i < total; i++)
+   {
+      double bodyHigh = MathMax(m_ramRateBuffer[i].open, m_ramRateBuffer[i].close);
+      double bodyLow = MathMin(m_ramRateBuffer[i].open, m_ramRateBuffer[i].close);
+      m_ramRateBuffer[i].high = NormalizePrice(bodyHigh);
+      m_ramRateBuffer[i].low = NormalizePrice(bodyLow);
+   }
    ResetLastError();
    m_lastFlushTryMs = GetTickCount();
 
@@ -1756,15 +1748,18 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
    {
       if(EnsureWorkerSession())
       {
-         // Use MBP_RenkoFeedRatesW: the DLL owns the family-aware OHLC sub-tick
-         // expansion logic (CLASSIC / MEDIAN / TURBO / HYBRID), so we pass one
-         // entry per M1 bar as [open, low/high-ordered, close] price + bar timeMs.
-         // The DLL applies the same BUG-R2 open-first ordering internally.
-         int bufferSize = total * 4;  // max 4 synthetic ticks per bar
-         double prices[];
+         // Deep M1 history is handled by the DLL. Pass one real M1 OHLC row per
+         // source bar; the backend expands it into deterministic sub-ticks.
+         double opens[];
+         double highs[];
+         double lows[];
+         double closes[];
          long times[];
-         ArrayResize(prices, bufferSize);
-         ArrayResize(times, bufferSize);
+         ArrayResize(opens, total);
+         ArrayResize(highs, total);
+         ArrayResize(lows, total);
+         ArrayResize(closes, total);
+         ArrayResize(times, total);
 
          int validCount = 0;
          datetime lastBarTimeTmp = (total > 0) ? src[0].time : 0;
@@ -1782,8 +1777,14 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
             lastBarTimeTmp = src[i].time;
 
             long baseTimeMsc = (long)src[i].time * 1000;
+            opens[validCount] = src[i].open;
+            highs[validCount] = src[i].high;
+            lows[validCount] = src[i].low;
+            closes[validCount] = src[i].close;
+            times[validCount] = baseTimeMsc;
+            validCount++;
 
-            // Spread the 4 synthetic ticks across the 60-second M1 window (0/20/40/59s)
+            /*
             // so bricks that complete at different ticks receive distinct second-level
             // timestamps. This prevents all bricks from an M1 bar clustering at t+0,
             // which would produce narrow bars separated by 57-second visual gaps on the
@@ -1801,18 +1802,22 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
                prices[validCount] = src[i].low;  times[validCount] = baseTimeMsc + 40000; validCount++;
             }
             prices[validCount] = src[i].close; times[validCount] = baseTimeMsc + 59000; validCount++;
+            */
          }
 
          if(validCount > 0)
          {
-            ArrayResize(prices, validCount);
+            ArrayResize(opens, validCount);
+            ArrayResize(highs, validCount);
+            ArrayResize(lows, validCount);
+            ArrayResize(closes, validCount);
             ArrayResize(times, validCount);
-            long lastFedTimeMsc = times[validCount - 1];
-            // Use the rates-specific DLL entry point so the backend can apply
-            // family-aware brick formation (CLASSIC/MEDIAN/TURBO/HYBRID).
-            if(MBP_RenkoFeedRatesW(m_workerSessionKey, m_customSymbol, prices, times, validCount) > 0)
+            long lastFedTimeMsc = times[validCount - 1] + 59000;
+            int queuedTicks = MBP_RenkoFeedM1RatesW(m_workerSessionKey, m_customSymbol,
+                                                   opens, highs, lows, closes, times, validCount);
+            if(queuedTicks > 0)
             {
-               // MBP_RenkoFeedRatesW is asynchronous: it enqueues and signals the
+               // MBP_RenkoFeedM1RatesW is asynchronous: it enqueues and signals the
                // background DLL worker thread. We must poll until lastTickMsc reaches
                // the last fed timestamp before draining, or we'll get 0 bars back.
                long histInfo[];
@@ -1843,15 +1848,17 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
                }
                else
                {
+                  Print("[Renko] DLL M1 history generated ", totalDrained,
+                        " bricks for ", m_customSymbol, ".");
                   m_isReplayingHistory = false;
                   return true;
                }
             }
             else
             {
-               Print("[Renko] WARNING: DLL bulk M1 rates feed failed for ", m_customSymbol,
+               Print("[Renko] WARNING: DLL deep M1 history feed failed for ", m_customSymbol,
                      ". Falling back to MQL5 ProcessRenkoTick loop.");
-               DisableWorkerSession("bulk rate feed failed");
+               DisableWorkerSession("deep M1 history feed failed");
             }
          }
       }
@@ -1993,6 +2000,8 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
                }
                else
                {
+                  Print("[Renko] DLL tick history generated ", totalDrainedT,
+                        " bricks for ", m_customSymbol, ".");
                   m_isReplayingHistory = false;
                   return true;
                }
@@ -2292,8 +2301,6 @@ int CRenkoEngine::DrainWorkerClosedBars()
       int idx = ArraySize(m_ramRateBuffer);
       ArrayResize(m_ramRateBuffer, idx + 1, 128);
       double brickOpen = NormalizePrice(closedDoubles[i * 4 + 0]);
-      double rawHigh = NormalizePrice(closedDoubles[i * 4 + 1]);
-      double rawLow = NormalizePrice(closedDoubles[i * 4 + 2]);
       double brickClose = NormalizePrice(closedDoubles[i * 4 + 3]);
 
       // A Renko brick must always have a body. Zero-body bars indicate a DLL
@@ -2308,20 +2315,10 @@ int CRenkoEngine::DrainWorkerClosedBars()
 
       double bodyHigh = MathMax(brickOpen, brickClose);
       double bodyLow = MathMin(brickOpen, brickClose);
-      double brickHigh = bodyHigh;
-      double brickLow = bodyLow;
-      if(m_showWicks)
-      {
-         brickHigh = MathMax(rawHigh, bodyHigh);
-         brickLow = MathMin(rawLow, bodyLow);
-      }
-      // Enforce MT5 OHLC validity: high must cover body, low must undercut body
-      brickHigh = MathMax(brickHigh, bodyHigh);
-      brickLow  = MathMin(brickLow,  bodyLow);
       m_ramRateBuffer[idx].time = startTime;
       m_ramRateBuffer[idx].open = brickOpen;
-      m_ramRateBuffer[idx].high = brickHigh;
-      m_ramRateBuffer[idx].low = brickLow;
+      m_ramRateBuffer[idx].high = NormalizePrice(bodyHigh);
+      m_ramRateBuffer[idx].low = NormalizePrice(bodyLow);
       m_ramRateBuffer[idx].close = brickClose;
       m_ramRateBuffer[idx].tick_volume = MathMax((long)1, closedLongs[i * 3 + 1]);
       m_ramRateBuffer[idx].spread = 0;
