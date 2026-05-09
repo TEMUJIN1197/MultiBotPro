@@ -2,13 +2,26 @@
 #define __MULTIBOTPRO_PYTHONBRIDGE_MQH__
 //+------------------------------------------------------------------+
 //|                                     MultiBotPro_PythonBridge.mqh |
-//|                                     Headless WinPython Launcher  |
+//|                                                                  |
+//| ShadowMaster launcher. As of the self-contained PyInstaller build,|
+//| no separate Python runtime is required — the .exe ships its own  |
+//| interpreter and all dependencies. WinPython folder is no longer  |
+//| bundled by build_installer.ps1 / MultiBotInstaller.iss.          |
 //+------------------------------------------------------------------+
 #property strict
 
 #import "shell32.dll"
 int ShellExecuteW(int hwnd, string lpOperation, string lpFile, string lpParameters, string lpDirectory, int nShowCmd);
 #import
+
+// Returns true if the file exists at the given absolute Windows path.
+// Uses kernel32 GetFileAttributesW (declared in MultiBotPro_Defines.mqh) so it
+// works even when accel.dll is not loaded.
+bool MBP_NativeFileExists(const string path)
+{
+   return (GetFileAttributesW(path) != 0xFFFFFFFF);
+}
+
 
 string MBP_GetProgramDirectoryPath()
 {
@@ -50,7 +63,7 @@ public:
       string exePath = MBP_GetShadowMasterExecutablePath();
       string workingDir = MBP_GetShadowMasterWorkingDirectory();
 
-      if(exePath == "" || MBP_FileExistsW(exePath) <= 0)
+      if(exePath == "" || !MBP_NativeFileExists(exePath))
       {
          Print("ShadowMaster launch skipped: executable not found at ", exePath);
          return false;
@@ -59,7 +72,25 @@ public:
       Print("Starting standalone ShadowMaster Artificial Intelligence engine...");
       string args = "\"" + runtime_config_path + "\"";
       int result = ShellExecuteW(0, "open", exePath, args, workingDir, 0);
-      return (result > 32);
+      if(result <= 32)
+      {
+         // ShellExecuteW returns <=32 on failure. Common codes:
+         //   0  = out of memory
+         //   2  = ERROR_FILE_NOT_FOUND
+         //   3  = ERROR_PATH_NOT_FOUND
+         //   8  = ERROR_BAD_FORMAT  (our LFS pointer / corrupt PE case)
+         //   31 = no application is associated
+         string hint = "";
+         if(result == 8)
+            hint = " (BAD_FORMAT — likely a Git LFS pointer or stub. Restore the real PyInstaller-built ShadowMaster.exe.)";
+         else if(result == 2 || result == 3)
+            hint = " (file/path not found)";
+         else if(result == 31)
+            hint = " (no associated application)";
+         Print("ShadowMaster launch FAILED. ShellExecuteW returned ", result, hint);
+         return false;
+      }
+      return true;
    }
 };
 

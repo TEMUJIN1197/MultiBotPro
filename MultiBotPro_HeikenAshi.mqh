@@ -5,12 +5,12 @@
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //+------------------------------------------------------------------+
 #include "MultiBotPro_Defines.mqh"
+#include "MultiBotPro_CustomSymbolPublisher.mqh"
 
-class CHeikenAshiEngine
+class CHeikenAshiEngine : public CCustomSymbolPublisher
 {
 private:
    string          m_symbol;
-   string          m_customSymbol;
    ENUM_TIMEFRAMES m_timeframe;
    long            m_chartID;
 
@@ -23,19 +23,11 @@ private:
    double          m_lastSourceBid;
    double          m_lastSourceAsk;
    datetime        m_currentBarTime;
-   long            m_lastLiveTickMsc;
-   bool            m_tickMirroringEnabled;
-   bool            m_tickMirrorWarningLogged;
-   int             m_tickMirrorFailureCount;
-   ulong           m_tickMirrorRetryAfterMs;
 
 public:
    CHeikenAshiEngine() : m_timeframe(PERIOD_M1), m_chartID(0), m_prevOpen(0), m_prevClose(0),
                          m_liveOpen(0), m_liveHigh(0), m_liveLow(0), m_liveClose(0),
-                         m_lastSourceBid(0), m_lastSourceAsk(0), m_currentBarTime(0),
-                         m_lastLiveTickMsc(0), m_tickMirroringEnabled(true),
-                         m_tickMirrorWarningLogged(false), m_tickMirrorFailureCount(0),
-                         m_tickMirrorRetryAfterMs(0) {}
+                         m_lastSourceBid(0), m_lastSourceAsk(0), m_currentBarTime(0) {}
 
    void Init(string symbol, string customSymbol, ENUM_TIMEFRAMES timeframe)
    {
@@ -52,11 +44,7 @@ public:
       m_lastSourceBid = 0;
       m_lastSourceAsk = 0;
       m_currentBarTime = 0;
-      m_lastLiveTickMsc = 0;
-      m_tickMirroringEnabled = true;
-      m_tickMirrorWarningLogged = false;
-      m_tickMirrorFailureCount = 0;
-      m_tickMirrorRetryAfterMs = 0;
+      ResetPublisherState();
    }
 
    void SetChartID(long chartID) { m_chartID = chartID; }
@@ -79,11 +67,45 @@ public:
    {
       Print("Heiken Ashi Build: ", m_symbol, " -> ", m_customSymbol, " (TF: ", EnumToString(m_timeframe), ")");
 
-      CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
-
       MqlRates src[];
-      datetime start = TimeCurrent() - (daysBack * 86400);
+      int periodSec = PeriodSeconds(m_timeframe);
+      datetime fullStart = TimeCurrent() - (daysBack * 86400);
+      datetime start = fullStart;
+      bool incremental = false;
+      double seedOpen = 0.0;
+      double seedClose = 0.0;
+
+      if(Bars(m_customSymbol, m_timeframe) > 2)
+      {
+         MqlRates lastRates[];
+         int copiedLast = CopyRates(m_customSymbol, m_timeframe, 0, 3, lastRates);
+         if(copiedLast >= 2)
+         {
+            MqlRates last = lastRates[copiedLast - 1];
+            datetime deleteFrom = MathMax(fullStart, last.time - 7200);
+            MqlRates seedRates[];
+            int copiedSeed = CopyRates(m_customSymbol, m_timeframe, fullStart, deleteFrom - 1, seedRates);
+            if(copiedSeed > 0)
+            {
+               MqlRates seed = seedRates[copiedSeed - 1];
+               seedOpen = seed.open;
+               seedClose = seed.close;
+               start = MathMax(fullStart, deleteFrom - periodSec);
+               CustomRatesDelete(m_customSymbol, deleteFrom, LONG_MAX);
+               CustomTicksDelete(m_customSymbol, (long)deleteFrom * 1000, LONG_MAX);
+               incremental = true;
+               Print("[HeikenAshi] Incremental build for ", m_customSymbol,
+                     ": replaying from ", start, " after retained bar ", seed.time);
+            }
+         }
+      }
+
+      if(!incremental)
+      {
+         CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
+         CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
+      }
+
       int total = CopyRates(m_symbol, m_timeframe, start, TimeCurrent(), src);
       if(total <= 0)
          return false;
@@ -91,17 +113,23 @@ public:
       MqlRates haRates[];
       ArrayResize(haRates, total);
 
-      double prevHaOpen = 0.0;
-      double prevHaClose = 0.0;
+      double prevHaOpen = seedOpen;
+      double prevHaClose = seedClose;
 
       for(int i = 0; i < total; i++)
       {
          double haClose = (src[i].open + src[i].high + src[i].low + src[i].close) / 4.0;
-         double haOpen = (i == 0) ? ((src[i].open + src[i].close) / 2.0) : ((prevHaOpen + prevHaClose) / 2.0);
+         double haOpen = (prevHaOpen == 0.0 && prevHaClose == 0.0) ? ((src[i].open + src[i].close) / 2.0) : ((prevHaOpen + prevHaClose) / 2.0);
          double haHigh = MathMax(src[i].high, MathMax(haOpen, haClose));
          double haLow = MathMin(src[i].low, MathMin(haOpen, haClose));
+         // Guarantee MT5 OHLC validity
+         haHigh = MathMax(haHigh, MathMax(haOpen, haClose));
+         haLow  = MathMin(haLow,  MathMin(haOpen, haClose));
 
-         haRates[i].time = src[i].time;
+         // Bar time = last tick of the underlying bar (bar open + period - 1s).
+         // For committed history bars this gives last-tick semantics consistent
+         // with Renko types. The live bar keeps the current-bar open time.
+         haRates[i].time = (i < total - 1) ? (src[i].time + periodSec - 1) : src[i].time;
          haRates[i].open = haOpen;
          haRates[i].high = haHigh;
          haRates[i].low = haLow;
@@ -194,6 +222,43 @@ private:
          m_lastSourceAsk = m_lastSourceBid;
    }
 
+   void BackfillGap(datetime fromTime, datetime toTime)
+   {
+      MqlRates src[];
+      int total = CopyRates(m_symbol, m_timeframe, fromTime + PeriodSeconds(m_timeframe), toTime - 1, src);
+      if(total <= 0)
+         return;
+
+      MqlRates haRates[];
+      ArrayResize(haRates, total);
+
+      int periodSec = PeriodSeconds(m_timeframe);
+      for(int i = 0; i < total; i++)
+      {
+         double haClose = (src[i].open + src[i].high + src[i].low + src[i].close) / 4.0;
+         double haOpen = (m_prevOpen + m_prevClose) / 2.0;
+         double haHigh = MathMax(src[i].high, MathMax(haOpen, haClose));
+         double haLow = MathMin(src[i].low, MathMin(haOpen, haClose));
+         haHigh = MathMax(haHigh, MathMax(haOpen, haClose));
+         haLow  = MathMin(haLow,  MathMin(haOpen, haClose));
+
+         // Committed gap bars use last-tick time (bar open + period - 1s).
+         haRates[i].time = src[i].time + periodSec - 1;
+         haRates[i].open = haOpen;
+         haRates[i].high = haHigh;
+         haRates[i].low = haLow;
+         haRates[i].close = haClose;
+         haRates[i].tick_volume = src[i].tick_volume;
+         haRates[i].spread = src[i].spread;
+         haRates[i].real_volume = src[i].real_volume;
+
+         m_prevOpen = haOpen;
+         m_prevClose = haClose;
+      }
+
+      SafeCustomRatesUpdate(haRates, total);
+   }
+
    void SyncFromTick(const MqlTick &tick, const bool allowMirrorDegrade)
    {
       MqlRates src[];
@@ -204,6 +269,31 @@ private:
       datetime barTime = src[0].time;
       if(m_currentBarTime != 0 && barTime != m_currentBarTime)
       {
+         int periodSec = PeriodSeconds(m_timeframe);
+
+         // Commit the just-closed bar with last-tick timestamp before rolling state.
+         // We use tick.time (the first tick of the new bar) - 1 as the close time
+         // of the previous bar, clamped so it doesn't overlap.
+         datetime committedTime = (tick.time > 0 && tick.time > m_currentBarTime)
+                                  ? (tick.time - 1)
+                                  : (m_currentBarTime + periodSec - 1);
+         MqlRates committed[1];
+         committed[0].time = committedTime;
+         committed[0].open = m_liveOpen;
+         committed[0].high = m_liveHigh;
+         committed[0].low = m_liveLow;
+         committed[0].close = m_liveClose;
+         committed[0].tick_volume = 1;
+         committed[0].spread = 0;
+         committed[0].real_volume = 0;
+         SafeCustomRatesUpdate(committed, 1);
+
+         if(barTime > m_currentBarTime + periodSec)
+         {
+            Print("[HeikenAshi] Gap detected! Backfilling missing bars from ", m_currentBarTime, " to ", barTime);
+            BackfillGap(m_currentBarTime, barTime);
+         }
+
          m_prevOpen = m_liveOpen;
          m_prevClose = m_liveClose;
       }
@@ -212,6 +302,8 @@ private:
       double haOpen = (m_prevOpen == 0 && m_prevClose == 0) ? ((src[0].open + src[0].close) / 2.0) : ((m_prevOpen + m_prevClose) / 2.0);
       double haHigh = MathMax(src[0].high, MathMax(haOpen, haClose));
       double haLow = MathMin(src[0].low, MathMin(haOpen, haClose));
+      haHigh = MathMax(haHigh, MathMax(haOpen, haClose));
+      haLow  = MathMin(haLow,  MathMin(haOpen, haClose));
 
       m_currentBarTime = barTime;
       m_liveOpen = haOpen;
@@ -233,20 +325,23 @@ private:
       if(m_currentBarTime <= 0)
          return;
 
+      // Guarantee OHLC validity before publishing the live bar.
+      double safeHigh = MathMax(m_liveHigh, MathMax(m_liveOpen, m_liveClose));
+      double safeLow  = MathMin(m_liveLow,  MathMin(m_liveOpen, m_liveClose));
+
       MqlRates rate[1];
       rate[0].time = m_currentBarTime;
       rate[0].open = m_liveOpen;
-      rate[0].high = m_liveHigh;
-      rate[0].low = m_liveLow;
+      rate[0].high = safeHigh;
+      rate[0].low = safeLow;
       rate[0].close = m_liveClose;
       rate[0].tick_volume = 1;
       rate[0].spread = 0;
       rate[0].real_volume = 0;
 
       ResetLastError();
-      if(!CustomRatesUpdate(m_customSymbol, rate, 1))
+      if(!SafeCustomRatesUpdate(rate, 1))
       {
-         Print("[HeikenAshi] WARNING: Live rate update failed for ", m_customSymbol, " (Err: ", _LastError, ")");
          return;
       }
 
@@ -272,50 +367,8 @@ private:
       CustomSymbolSetDouble(m_customSymbol, SYMBOL_ASK, ask);
       CustomSymbolSetDouble(m_customSymbol, SYMBOL_LAST, last);
 
-      if(!m_tickMirroringEnabled)
-      {
-         if(!allowMirrorDegrade)
-            return;
-
-         if(GetTickCount() < m_tickMirrorRetryAfterMs)
-            return;
-
-         m_tickMirroringEnabled = true;
-      }
-
       long liveTickMsc = ReserveCustomTickTimeMsc((tickTimeMsc > 0) ? tickTimeMsc : ((long)syntheticTime * 1000));
-
-      MqlTick liveTick[1];
-      ZeroMemory(liveTick);
-      liveTick[0].time = (datetime)(liveTickMsc / 1000);
-      liveTick[0].time_msc = liveTickMsc;
-      liveTick[0].bid = bid;
-      liveTick[0].ask = ask;
-      liveTick[0].last = last;
-      liveTick[0].volume = 1;
-      liveTick[0].volume_real = 0.0;
-      liveTick[0].flags = TICK_FLAG_BID | TICK_FLAG_ASK | TICK_FLAG_LAST;
-
-      ResetLastError();
-      if(!CustomTicksAdd(m_customSymbol, liveTick, 1))
-      {
-         int tickError = _LastError;
-         if(!allowMirrorDegrade)
-            return;
-
-         m_tickMirrorFailureCount++;
-         if(m_tickMirrorFailureCount >= 3)
-         {
-            m_tickMirrorRetryAfterMs = GetTickCount() + 5000;
-            DisableTickMirroring("live update", tickError);
-         }
-         return;
-      }
-
-      m_tickMirroringEnabled = true;
-      m_tickMirrorFailureCount = 0;
-      m_tickMirrorWarningLogged = false;
-      m_lastLiveTickMsc = liveTickMsc;
+      PublishLiveStateTick(syntheticTime, liveTickMsc, bid, ask, last, allowMirrorDegrade);
    }
 
    long ReserveCustomTickTimeMsc(long candidateTimeMsc)
@@ -329,17 +382,6 @@ private:
          normalizedTimeMsc = minTimeMsc;
 
       return normalizedTimeMsc;
-   }
-
-   void DisableTickMirroring(string stage, int errorCode)
-   {
-      m_tickMirroringEnabled = false;
-      if(m_tickMirrorWarningLogged)
-         return;
-
-      m_tickMirrorWarningLogged = true;
-      Print("[HeikenAshi] WARNING: Custom tick mirroring disabled for ", m_customSymbol,
-            " after ", stage, " failed (Err: ", errorCode, "). Rates-only mode will continue.");
    }
 };
 

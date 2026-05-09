@@ -563,7 +563,7 @@ void Slave_SaveMap()
 
 void Slave_AddLink(ulong slaveT, ulong masterT) {
    int s = ArraySize(TradeMap);
-   ArrayResize(TradeMap, s+1);
+   ArrayResize(TradeMap, s+1, 512);
    TradeMap[s].slaveTicket  = slaveT;
    TradeMap[s].masterTicket = masterT;
    Slave_SaveMap(); 
@@ -677,7 +677,7 @@ int Slave_CountActiveLinkedSymbols()
       if(exists)
          continue;
 
-      ArrayResize(activeSymbols, uniqueCount + 1);
+      ArrayResize(activeSymbols, uniqueCount + 1, 128);
       activeSymbols[uniqueCount] = currentSymbol;
       uniqueCount++;
    }
@@ -841,7 +841,7 @@ void Slave_WriteActiveMasterTickets()
       if(count >= MBP_SLAVE_MAX_ACTIVE_TICKETS)
          break;
 
-      ArrayResize(tickets, count + 1);
+      ArrayResize(tickets, count + 1, 128);
       tickets[count] = linkedMasterTicket;
       count++;
    }

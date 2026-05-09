@@ -21,7 +21,8 @@ class CChartFactory;
 enum ENUM_BOT_MODE {
    BOT_MODE_STANDALONE, // Standalone Mode
    BOT_MODE_MASTER,     // Master Mode
-   BOT_MODE_SLAVE       // Slave Mode
+   BOT_MODE_SLAVE,      // Slave Mode
+   BOT_MODE_WORKER      // Worker Mode (Coordinator/Worker architecture)
 };
 
 enum ENUM_MBP_RUNTIME_ROLE
@@ -69,7 +70,8 @@ enum ENUM_START_MODE
 enum ENUM_HISTORY_DATA_TYPE 
 { 
    DATA_M1,   // M1 OHLC (Fast)
-   DATA_TICK  // Real Ticks (Accurate but Slow)
+   DATA_TICK, // Real Ticks (Accurate but Slow)
+   DATA_HYBRID // M1 Deep + Ticks Recent (Best of both)
 };
 
 enum ENUM_BLOCK_MODE 
@@ -352,6 +354,91 @@ struct STradePosition
    double            current_profit;
 };
 
+// ============================================================================
+// BASKET-LEVEL STATE TRACKING CLASS (NEW - Phase 1)
+// ============================================================================
+// Tracks grid phases and zone state per (BasketId, Symbol) combination.
+// Stored as pointer array in SSymbolData so individual basket states can be
+// referenced via SBasketState* pointers (MQL5 requires class for pointer semantics).
+class SBasketState
+{
+public:
+   int    BasketId;              // Unique basket identifier
+   bool   GridPhase1Active;      // True when in initial grid mode (no SL/TP)
+   bool   GridPhase2Active;      // True when grid basket profit reached and in trailing mode
+   double ZoneTopPrice;          // Upper Boundary (Buy Trigger) for zone recovery
+   double ZoneBottomPrice;       // Lower Boundary (Sell Trigger) for zone recovery
+   double ZoneNextLot;           // Calculated lot for the next hedge in zone recovery
+   int    ZoneSeqCount;          // Number of recovery trades placed in zone sequence
+   bool   ZoneActive;            // Is a Zone Recovery sequence running?
+   bool   ZoneResolved;          // Flag when zone target logic is met
+   double CurrentRecoveryPortion;// Portion of accumulated pruning loss allocated to this basket
+   double GridTargetProfit;      // Profit target for this basket (including recovery portion)
+   bool   GridTPHit;             // Has the zone/grid impulse or dollar target been hit?
+   double GridTPHitPrice;        // The price where the zone/grid TP was marked
+   bool   GridTargetReached;     // True when grid target was hit and transition is pending/complete
+
+   // Constructor — zero-initializes all fields
+   SBasketState()
+   {
+      BasketId              = -1;
+      GridPhase1Active      = false;
+      GridPhase2Active      = false;
+      ZoneTopPrice          = 0.0;
+      ZoneBottomPrice       = 0.0;
+      ZoneNextLot           = 0.0;
+      ZoneSeqCount          = 0;
+      ZoneActive            = false;
+      ZoneResolved          = false;
+      CurrentRecoveryPortion = 0.0;
+      GridTargetProfit      = 0.0;
+      GridTPHit             = false;
+      GridTPHitPrice        = 0.0;
+      GridTargetReached     = false;
+   }
+};
+
+// ============================================================================
+// WORKER/COORDINATOR COMMUNICATION STRUCTS (NEW - Phase 1)
+// ============================================================================
+
+// Worker Assignment (Coordinator → Worker via global variable)
+struct SWorkerAssignment
+{
+   string symbol;                 // Assigned symbol (e.g., "EURUSD")
+   int    workerChartId;          // Chart ID of the worker EA
+   int    workerIndex;            // Index in coordinator's worker list (0-based)
+   int    totalWorkers;           // Total number of workers spawned
+   bool   isMultiSymbol;          // True if this worker handles multiple symbols
+};
+
+// Worker Status Report (Worker → Coordinator via global variable)
+struct SWorkerStatus
+{
+   int    workerId;               // Worker chart ID or identifier
+   string symbol;                 // Primary assigned symbol
+   bool   isAlive;                // Heartbeat flag
+   double equity;                 // Current equity of worker
+   double pnl;                    // Current P&L of worker
+   int    activePositions;        // Number of open positions
+   int    gridLevel;              // Current grid level (0 if no grid active)
+   int    zoneSeqCount;           // Current zone sequence count (0 if no zone active)
+   ulong  lastHeartbeat;          // Timestamp of last status update (Unix milliseconds)
+};
+
+// Coordinator System State (Coordinator → All Workers via global variable)
+struct SCoordinatorState
+{
+   double totalEquity;            // Aggregated equity across all workers
+   double totalBalance;           // Aggregated balance
+   double dailyLoss;              // Current daily P&L (negative = loss)
+   double maxDrawdown;            // Maximum observed drawdown from session start
+   bool   isPaused;               // Pause all workers flag
+   bool   isDailyLimitHit;        // Daily loss limit breached
+   bool   isTotalLimitHit;        // Total system limit breached
+   ulong  lastUpdate;             // Timestamp of last coordinator update (Unix milliseconds)
+};
+
 // Symbol data structure
 struct SSymbolData
 {
@@ -595,7 +682,15 @@ struct SSymbolData
    double BoxHistoryWarmupPrevHigh;
    double BoxHistoryWarmupPrevLow;
    int  BoxHistoryWarmupLastTotalBars;
-   
+
+   // ============================================================================
+   // BASKET-LEVEL STATE TRACKING (NEW - Phase 1 Coordinator/Worker Refactor)
+   // ============================================================================
+   // Per-(BasketId, Symbol) tracking for grid phases and zone boundaries.
+   // Stored as pointer array so individual states can be returned by pointer.
+   SBasketState* BasketStates[100];        // Max 100 concurrent baskets per symbol (heap-allocated)
+   int           BasketStateCount;         // Current number of basket states tracked
+
 };
   
 // --- FILTER TRACKING STRUCTURE ---
@@ -624,11 +719,85 @@ void InitFilterTracker(int index)
 {
    if(ArraySize(FilterTracker) <= index)
       ArrayResize(FilterTracker, index + 1);
-   
+
    FilterTracker[index].SessionStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    FilterTracker[index].LastResetTime = TimeCurrent();
    FilterTracker[index].StopTrading = false;
 }
+
+// ============================================================================
+// BASKET STATE MANAGEMENT HELPERS (NEW - Phase 1)
+// ============================================================================
+
+/// Find basket state pointer by BasketId within a symbol's tracking array
+/// @param symbolData Reference to the SSymbolData struct for the symbol
+/// @param basketId The basket ID to search for
+/// @return Pointer to SBasketState, or NULL if not found
+SBasketState* FindBasketState(SSymbolData &symbolData, int basketId)
+{
+   for(int i = 0; i < symbolData.BasketStateCount; i++)
+   {
+      if(CheckPointer(symbolData.BasketStates[i]) != POINTER_INVALID &&
+         symbolData.BasketStates[i].BasketId == basketId)
+         return symbolData.BasketStates[i];
+   }
+   return NULL; // Not found
+}
+
+/// Get or create basket state by BasketId (returns pointer for in-place mutation).
+/// Creates a new SBasketState on the heap if none exists for this basketId.
+/// @param symbolData Reference to the SSymbolData struct for the symbol
+/// @param basketId The basket ID to get or create
+/// @return Pointer to SBasketState (valid), or NULL on overflow
+SBasketState* GetOrCreateBasketState(SSymbolData &symbolData, int basketId)
+{
+   SBasketState* existing = FindBasketState(symbolData, basketId);
+   if(existing != NULL)
+      return existing;
+
+   // Overflow guard
+   if(symbolData.BasketStateCount >= 100)
+   {
+      Print("ERROR: Maximum basket states (100) exceeded for symbol ", symbolData.symbol);
+      return NULL;
+   }
+
+   // Allocate and initialize
+   SBasketState* bs = new SBasketState();
+   bs.BasketId = basketId;
+
+   symbolData.BasketStates[symbolData.BasketStateCount] = bs;
+   symbolData.BasketStateCount++;
+
+   return bs;
+}
+
+/// Reset (delete + remove) basket state when a basket closes.
+/// @param symbolData Reference to the SSymbolData struct for the symbol
+/// @param basketId The basket ID to reset
+void ResetBasketState(SSymbolData &symbolData, int basketId)
+{
+   for(int i = 0; i < symbolData.BasketStateCount; i++)
+   {
+      if(CheckPointer(symbolData.BasketStates[i]) != POINTER_INVALID &&
+         symbolData.BasketStates[i].BasketId == basketId)
+      {
+         delete symbolData.BasketStates[i];
+         symbolData.BasketStates[i] = NULL;
+
+         // Compact array: move last element into this slot
+         if(i < symbolData.BasketStateCount - 1)
+            symbolData.BasketStates[i] = symbolData.BasketStates[symbolData.BasketStateCount - 1];
+
+         symbolData.BasketStates[symbolData.BasketStateCount - 1] = NULL;
+         symbolData.BasketStateCount--;
+         return;
+      }
+   }
+}
+
+// NOTE: A second overload GetOrCreateBasketState(int symbolIndex, int basketId)
+// is defined in MultiBotPro_Helpers.mqh (after SymbolData[] is declared).
 
 // --- V3 Bridge Pending Request (Async Handshake) ---
 struct SBridgePendingRequest
@@ -705,6 +874,7 @@ struct RuntimeServiceManager
   bool WriteFile(int hFile, const uchar &lpBuffer[], uint nNumberOfBytesToWrite, uint &lpNumberOfBytesWritten, uint lpOverlapped);
   bool CloseHandle(int hObject);
   bool MoveFileW(string lpExistingFileName, string lpNewFileName);
+  uint GetFileAttributesW(string lpFileName);   // Used as accel.dll-free file-existence check
 #import
 
 #endif // __MULTIBOTPRO_DEFINES_MQH__

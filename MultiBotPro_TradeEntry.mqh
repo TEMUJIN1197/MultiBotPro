@@ -7,6 +7,8 @@
 #property copyright "Copyright 2025, MetaQuotes Ltd."
 #property link      "https://discord.com/channels/929723953415589918/929723953415589920"
 
+#define MBP_AI_PARAM_MAX_AGE_SEC 172800
+
 //+------------------------------------------------------------------+
 //| Check entry signals (FIXED: Reverse Logic + MA Sell Fix)         |
 //+------------------------------------------------------------------+
@@ -27,6 +29,7 @@ void CheckEntrySignals(int symbolIndex)
    // 2. FORCE THROTTLE (Prevents Machine-Gun Effect)
    // Array ensures every symbol gets its own independent 2-second timer.
    static ulong lastCheckArr[100] = {0};
+   if(symbolIndex < 0 || symbolIndex >= 100) return;
    if(GetTickCount() - lastCheckArr[symbolIndex] < 2000) return;
    lastCheckArr[symbolIndex] = GetTickCount();
 
@@ -53,8 +56,8 @@ void CheckEntrySignals(int symbolIndex)
    bool nlpBlocked = false;
    if(InpEnableShadowMaster)
    {
-       if(SymbolData[symbolIndex].LastShadowUpdate > 0 && 
-         (TimeCurrent() - SymbolData[symbolIndex].LastShadowUpdate < 172800))
+       if(SymbolData[symbolIndex].LastShadowUpdate > 0 &&
+         (TimeCurrent() - SymbolData[symbolIndex].LastShadowUpdate < MBP_AI_PARAM_MAX_AGE_SEC))
        {
            if(SymbolData[symbolIndex].Dyn_CurrencyStrengthDelta > 0) 
                aiActive = true;
@@ -94,12 +97,22 @@ if(PositionGetString(POSITION_SYMBOL) == execSym)
                if(InpEnableMultiBaskets && !IsPositionInBasket(symbolIndex, posComment))
                   continue;
                long posMagic = PositionGetInteger(POSITION_MAGIC);
-               // We count it if the Magic Number matches OUR EA, 
-               // OR if it is 0 (in case the Handshake executed without a magic number)
-               if(IsAppTrade(posMagic) || posMagic == 0) 
+               if(!IsAppTrade(posMagic))
+                  continue;
+
+               // In MULTIBASKET mode the magic alone isn't enough — many baskets
+               // share the magic. Require the "B#<id>" tag in the comment so we
+               // only count positions belonging to THIS basket.
+               // In single-basket mode the magic-match is sufficient (per-worker
+               // magic offset already isolates workers from each other).
+               if(InpEnableMultiBaskets)
                {
-                   actualPositions++;
+                   int expectedBasketId = SymbolData[symbolIndex].BasketId;
+                   string basketTag = "B#" + IntegerToString(expectedBasketId);
+                   if(StringFind(posComment, basketTag) < 0)
+                       continue;
                }
+               actualPositions++;
            }
        }
    }
@@ -741,7 +754,7 @@ bool CheckMaxOpenTrades(int symbolIndex)
                   {
                      count++;
                      int size = ArraySize(countedBasketSymbols);
-                     ArrayResize(countedBasketSymbols, size + 1);
+                     ArrayResize(countedBasketSymbols, size + 1, 64);
                      countedBasketSymbols[size] = sym;
                   }
                }
@@ -772,7 +785,7 @@ bool CheckMaxOpenTrades(int symbolIndex)
                      {
                         count++;
                         int size = ArraySize(countedBasketSymbols);
-                        ArrayResize(countedBasketSymbols, size + 1);
+                        ArrayResize(countedBasketSymbols, size + 1, 64);
                         countedBasketSymbols[size] = sym;
                      }
                   }

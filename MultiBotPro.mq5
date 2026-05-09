@@ -155,6 +155,15 @@ int   G_RuntimePumpCursor = 0;
 int   G_TimerPumpCursor = 0;
 int   G_TickPumpCursor = 0;
 ENUM_MBP_RUNTIME_ROLE G_RuntimeRole = MBP_RUNTIME_LEGACY;
+
+// Per-worker magic-number isolation (Fix #13).
+// Workers stamp their trades with MagicNumber + workerIndex*MBP_WORKER_MAGIC_STRIDE
+// so a "close-by-magic" emergency on worker N doesn't kill worker M's positions.
+// Coordinator's IsAppTrade still recognises every offset for system-wide enforcement.
+#define MBP_WORKER_MAGIC_STRIDE 1000
+#define MBP_WORKER_MAGIC_MAX_OFFSETS 100
+int  G_RuntimeWorkerIndex     = -1;
+long G_EffectiveMagicNumber   = 0;
 ulong G_LastWorkerHeartbeatPublishMs = 0;
 ulong G_LastWorkerEnsureMs = 0;
 ulong G_LastWorkerTemplateSaveMs = 0;
@@ -251,6 +260,7 @@ void UpdateDashboard(long chart_id);
 void CreateDashboard();
 void DestroyDashboard();
 void InitReferenceEquity();
+void SaveBankState(int idx);
 void WipeBankState(int idx);
 string ShadowMaster_BuildRuntimeConfigJson();
 string ShadowMaster_BuildRuntimeSignature();
@@ -293,6 +303,10 @@ void RestoreFastChartSwitchDashboardState();
 //+------------------------------------------------------------------+
 //| INPUT PARAMETERS                                                 |
 //+------------------------------------------------------------------+
+// NOTE: These input parameters apply only to Coordinator/Master charts.
+// Worker mode charts ignore these parameters and receive configuration from the Coordinator.
+// If this EA is running in worker mode (IsParallelWorkerMode() = true), input changes
+// on this chart will have NO EFFECT. Modify parameters only on the Coordinator chart.
 
 // === 00. RUNTIME, DATA & BACKEND ===
 input group "=== 00. Runtime, Data & Backend ==="
@@ -633,6 +647,7 @@ input double GridLot_Per_Equity_Step = 10000; // Balance step size
 input ENUM_RISK_TYPE GridRiskType = RISK_PERCENT_EQUITY; // Fallback risk model
 input double GridRiskPercent      = 0.2; // Fallback risk percent
 input double GridFixedLot         = 0.01; // Fallback fixed lot
+input double GridRiskMoney        = 50.0; // Fallback fixed money risk
 input bool   GridCloseOnTP        = false; // Close grid at target
 
 sinput string DIV_ZONE_RECOV = "--- Zone Recovery ---";
@@ -1165,14 +1180,17 @@ datetime LastGlobalDailyReset = 0;
 // 2. INCLUDE DASHBOARD ELEMENTS
 #include "MultiBotPro_SymbolContext.mqh"
 #include "MultiBotPro_BundleHelpers.mqh"
-#include "MultiBotPro_PythonBridge.mqh"
+#include "MultiBotPro_AIBridge.mqh"
 #include "MultiBotPro_Dashboard.mqh"
 #include "MultiBotPro_Helpers.mqh"
 #include "MultiBotPro_Indicators.mqh"
 #include "MultiBotPro_VisualOverlay.mqh"
 #include "MultiBotPro_Risk.mqh"
 #include "MultiBotPro_TradeEntry.mqh"
-#include "MultiBotPro_GridZone.mqh"
+#include "MultiBotPro_GridZone_State.mqh"
+#include "MultiBotPro_GridZone_Positions.mqh"
+#include "MultiBotPro_GridZone_Analysis.mqh"
+#include "MultiBotPro_GridZone_Recovery.mqh"
 #include "MultiBotPro_GUI.mqh"
 // #include "MultiBotPro_ServiceManager.mqh" // REMOVED
 // #include "MultiBotPro_AnalysisEngine.mqh" // REMOVED
@@ -1183,6 +1201,27 @@ datetime LastGlobalDailyReset = 0;
 #include "MultiBotPro_HeikenRenko.mqh"
 #include "MultiBotPro_HeikenAshi.mqh"
 #include "MultiBotPro_CustomTime.mqh"
+
+// === NEW MODULAR COMPONENTS ===
+#include "MultiBotPro_SystemState.mqh"
+#include "MultiBotPro_MessageQueue.mqh"
+#include "MultiBotPro_RiskEngine.mqh"
+#include "MultiBotPro_BoundsChecking.mqh"
+#include "MultiBotPro_SystemTests.mqh"
+#include "MultiBotPro_Coordinator.mqh"
+
+// Global System State Instance
+CSystemState G_SystemState;
+
+// Global Message Queue for Coordinator↔Worker Communication
+CMbpMessageQueue G_CoordinatorQueue;
+CMbpMessageQueue G_WorkerQueue;
+
+// Global Risk Engine Instance
+CRiskEngine G_RiskEngine(&G_SystemState);
+
+// Global Coordinator Instance (Master orchestration)
+CCoordinator G_Coordinator(&G_SystemState, &G_CoordinatorQueue, &G_WorkerQueue, &G_RiskEngine);
 
 string MBP_PathJoin(string leftPath, string rightPath)
 {
@@ -1276,6 +1315,24 @@ void MBP_ClearWorkerLaunchMarker(const long workerChartId)
       GlobalVariableDel(tokenName);
    if(GlobalVariableCheck(tokenName + "_exp"))
       GlobalVariableDel(tokenName + "_exp");
+}
+
+// Non-consuming check used by chart-reuse logic: returns true if the marker exists
+// AND has not yet expired. Does not delete the marker.
+bool MBP_HasWorkerLaunchMarker(const long workerChartId)
+{
+   if(workerChartId <= 0)
+      return false;
+
+   string tokenName = MBP_WorkerLaunchMarkerName(workerChartId);
+   if(!GlobalVariableCheck(tokenName))
+      return false;
+
+   double expiry = GlobalVariableCheck(tokenName + "_exp") ? GlobalVariableGet(tokenName + "_exp") : 0.0;
+   if(expiry <= 0.0 || (double)TimeCurrent() >= expiry)
+      return false;
+
+   return true;
 }
 
 bool MBP_ConsumeWorkerLaunchMarker(const long workerChartId, double &coordinatorChartId)
@@ -1510,6 +1567,10 @@ bool MBP_ShouldMarkWorkerReloadingOnDeinit(const int reason)
 
 long MBP_FindReusableChartBySymbol(const string symbol, const long excludedChartId = 0)
 {
+   // SAFETY: Only reuse charts that already carry a worker launch marker — i.e. charts
+   // we previously spawned and lost track of. Reusing arbitrary charts with a matching
+   // symbol could hijack the user's analysis charts (overwrite their template and turn
+   // them into workers).
    long chartId = ChartFirst();
    while(chartId >= 0)
    {
@@ -1522,17 +1583,18 @@ long MBP_FindReusableChartBySymbol(const string symbol, const long excludedChart
          long assignedCoordinatorChartId = 0;
          string assignedSignature = "";
          datetime assignedAt = 0;
-         if(!MBP_ReadWorkerAssignment(chartId,
-                                      assignedSymbol,
-                                      assignedSymbolsCsv,
-                                      assignedChartSymbol,
-                                      assignedCoordinatorKey,
-                                      assignedCoordinatorChartId,
-                                      assignedSignature,
-                                      assignedAt))
-         {
+         bool hasAssignment = MBP_ReadWorkerAssignment(chartId,
+                                                       assignedSymbol,
+                                                       assignedSymbolsCsv,
+                                                       assignedChartSymbol,
+                                                       assignedCoordinatorKey,
+                                                       assignedCoordinatorChartId,
+                                                       assignedSignature,
+                                                       assignedAt);
+         // Only reuse if the chart carries our launch marker (i.e. we created it).
+         // User-opened charts with a matching symbol but no marker are skipped.
+         if(!hasAssignment && MBP_HasWorkerLaunchMarker(chartId))
             return chartId;
-         }
       }
       chartId = ChartNext(chartId);
    }
@@ -1965,8 +2027,16 @@ void MBP_EnsureWorkerSlots()
 
    for(int slotIndex = 0; slotIndex < slotCount; slotIndex++)
    {
-      int startIndex = slotIndex;
-      int endIndex = (slotIndex == slotCount - 1) ? (requestedCount - 1) : slotIndex;
+      // Balanced block split: 8 symbols / 3 slots = [3, 3, 2]
+      int symbolsPerSlot = requestedCount / slotCount;
+      int extraSymbols   = requestedCount % slotCount;
+      int startIndex     = slotIndex * symbolsPerSlot + MathMin(slotIndex, extraSymbols);
+      int blockSize      = symbolsPerSlot + (slotIndex < extraSymbols ? 1 : 0);
+      if(blockSize <= 0)
+         continue;
+      int endIndex       = startIndex + blockSize - 1;
+      if(endIndex >= requestedCount)
+         endIndex = requestedCount - 1;
 
       string primarySymbol = requestedSymbols[startIndex];
       string symbolsCsv = MBP_JoinSymbolSlice(requestedSymbols, startIndex, endIndex);
@@ -2026,8 +2096,13 @@ bool MBP_WriteWorkerAssignment(const long chartId,
                               const string symbolsCsv,
                               const string chartSymbol,
                               const string coordinatorKey,
-                              const string assignmentSignature)
+                              const string assignmentSignature,
+                              const int workerIndex = 0)
 {
+   // Note: an earlier "atomic rename" experiment broke worker boot — MT5's FileMove
+   // can fail silently when a reader holds the destination open (no FILE_SHARE_DELETE).
+   // Direct overwrite with shared-read is the safe path; partial-read race is mitigated
+   // by the launch marker fallback in ResolveRuntimeRoleForCurrentChart.
    int handle = FileOpen(MBP_WorkerAssignmentFile(chartId), FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
    if(handle == INVALID_HANDLE)
       return false;
@@ -2040,8 +2115,25 @@ bool MBP_WriteWorkerAssignment(const long chartId,
    FileWriteString(handle, StringFormat("coordinator_chart=%I64d\r\n", ChartID()));
    FileWriteString(handle, "coordinator_key=" + coordinatorKey + "\r\n");
    FileWriteString(handle, "assigned_at=" + IntegerToString((int)TimeCurrent()) + "\r\n");
+   FileWriteString(handle, "worker_index=" + IntegerToString(workerIndex) + "\r\n");
    FileClose(handle);
    return true;
+}
+
+// Lightweight helper to read just the worker index from the assignment file.
+// Returns -1 if not assigned or the index is missing/invalid.
+int MBP_ReadWorkerIndexFromAssignment(const long chartId)
+{
+   string payload = MBP_ReadTextFileCommon(MBP_WorkerAssignmentFile(chartId));
+   if(payload == "")
+      return -1;
+   string indexValue = MBP_ReadKeyValue(payload, "worker_index");
+   if(indexValue == "")
+      return -1;
+   int parsed = (int)StringToInteger(indexValue);
+   if(parsed < 0 || parsed >= MBP_WORKER_MAGIC_MAX_OFFSETS)
+      return -1;
+   return parsed;
 }
 
 bool MBP_ReadWorkerAssignment(const long chartId,
@@ -2232,9 +2324,54 @@ void MBP_RefreshWorkerAssignment()
    if(assignedSignature != "" && StringCompare(G_RuntimeAssignedWorkerSignature, assignedSignature, false) != 0)
       G_RuntimeAssignedWorkerSignature = assignedSignature;
 
+   int refreshedIndex = MBP_ReadWorkerIndexFromAssignment(ChartID());
+   if(refreshedIndex >= 0 && refreshedIndex != G_RuntimeWorkerIndex)
+   {
+      bool wasInitialised = (G_RuntimeWorkerIndex >= 0);
+      G_RuntimeWorkerIndex = refreshedIndex;
+
+      // CRITICAL: First learning (boot via launch marker → file becomes readable later)
+      // is NOT a reassignment. Updating the magic in place is enough; a full reapply
+      // here would loop forever because OnInit ran before the file was visible.
+      if(!wasInitialised)
+      {
+         if(refreshedIndex < MBP_WORKER_MAGIC_MAX_OFFSETS)
+         {
+            G_EffectiveMagicNumber = (long)MagicNumber + (long)refreshedIndex * MBP_WORKER_MAGIC_STRIDE;
+            Trade.SetExpertMagicNumber(G_EffectiveMagicNumber);
+            Print(EmojiBrain(), " Worker ", refreshedIndex,
+                  " learned its slot — magic updated in-place to ", G_EffectiveMagicNumber, ".");
+         }
+      }
+      else
+      {
+         // True reassignment: the coordinator changed our index. Magic and
+         // SymbolData both need rebuilding, so a template reapply is justified.
+         changed = true;
+      }
+   }
+
    if(changed)
-      Print(EmojiBrain(), " Worker assignment refreshed: ", G_RuntimeAssignedSymbolsCsv,
-            " on ", G_RuntimeAssignedChartSymbol, ".");
+   {
+      Print(EmojiBrain(), " Worker assignment changed: ", G_RuntimeAssignedSymbolsCsv,
+            " on ", G_RuntimeAssignedChartSymbol, ". Reapplying template to rebuild SymbolData.");
+
+      // Use a global-variable throttle: a static would reset on reapply because the
+      // EA reinitialises, defeating the throttle and producing a reapply loop.
+      string throttleGV = StringFormat("MBP_WorkerReapply_%I64d", ChartID());
+      ulong nowMs = GetTickCount64();
+      ulong lastReapplyMs = 0;
+      if(GlobalVariableCheck(throttleGV))
+         lastReapplyMs = (ulong)GlobalVariableGet(throttleGV);
+
+      if(lastReapplyMs == 0 || (nowMs - lastReapplyMs) >= 30000)
+      {
+         GlobalVariableSet(throttleGV, (double)nowMs);
+         string templateName = MBP_WorkerTemplateName();
+         if(templateName != "" && !ChartApplyTemplate(0, templateName))
+            Print(EmojiWarning(), " Worker self-reapply failed; symbol data will remain stale until coordinator forces a respawn.");
+      }
+   }
 }
 
 void MBP_LockWorkerChartSymbol()
@@ -2269,6 +2406,7 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
    G_RuntimeAssignedChartSymbol = "";
    G_RuntimeAssignedSymbolsCsv = "";
    G_RuntimeAssignedWorkerSignature = "";
+   G_RuntimeWorkerIndex = -1;
    ArrayResize(G_RuntimeAssignedSymbols, 0);
 
    string assignedSymbol = "";
@@ -2307,6 +2445,7 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
                                                MBP_SanitizeRuntimeToken(InpHedgeChannel),
                                                assignedCoordinatorChartId);
       G_RuntimeCoordinatorKey = assignedCoordinatorKey;
+      G_RuntimeWorkerIndex    = MBP_ReadWorkerIndexFromAssignment(ChartID());
       return MBP_RUNTIME_WORKER;
    }
 
@@ -2340,6 +2479,46 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
    if(BotSystemMode != BOT_MODE_SLAVE)
    {
       G_RuntimeCoordinatorKey = MBP_DefaultCoordinatorKey();
+
+      // Singleton guard: refuse coordinator role if a DIFFERENT chart already owns
+      // this key and its heartbeat is fresh (< 5 seconds old). The owner GV stores
+      // the chart ID so a chart re-initialising (REASON_PARAMETERS, CHARTCHANGE,
+      // RECOMPILE, TEMPLATE) can re-claim its own role instead of being blocked
+      // by its own pre-deinit heartbeat.
+      string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
+      string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
+      long myChartId = ChartID();
+
+      // CRITICAL: MT5 chart IDs (e.g. 134221287195433199) exceed 2^53 — they cannot
+      // round-trip exactly through a double. To compare against the GV-stored value
+      // we must apply the same lossy round-trip to both sides; otherwise the same
+      // chart's pre-deinit GV blocks its own re-claim because the stored long has
+      // been rounded to the nearest multiple of 16 or 32.
+      long myChartIdAsStored = (long)(double)myChartId;
+
+      if(GlobalVariableCheck(coordAliveGV))
+      {
+         ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
+         ulong nowMs    = GetTickCount64();
+         if(lastBeat > 0 && nowMs >= lastBeat && (nowMs - lastBeat) < 5000)
+         {
+            long ownerChartId = GlobalVariableCheck(coordOwnerGV) ?
+                                (long)GlobalVariableGet(coordOwnerGV) : 0;
+            if(ownerChartId != 0 && ownerChartId != myChartIdAsStored)
+            {
+               Print(EmojiWarning(), " Another coordinator is already running for key '",
+                     G_RuntimeCoordinatorKey, "' on chart ", ownerChartId,
+                     " (mine=", myChartIdAsStored, ", heartbeat ", (nowMs - lastBeat),
+                     "ms ago). This chart will run as LEGACY (no worker spawning).");
+               return MBP_RUNTIME_LEGACY;
+            }
+            // Same-chart re-init: fall through and re-claim.
+         }
+      }
+
+      // Stamp our claim — both timestamp and owner — so siblings see us and step down.
+      GlobalVariableSet(coordAliveGV, (double)GetTickCount64());
+      GlobalVariableSet(coordOwnerGV, (double)myChartId);
       return MBP_RUNTIME_COORDINATOR;
    }
 
@@ -2682,31 +2861,81 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
          long assignedCoordinatorChartId = 0;
          string assignedSignature = "";
          datetime assignedAt = 0;
-         if(MBP_ReadWorkerAssignment(chartId,
-                                     assignedSymbol,
-                                     assignedSymbolsCsv,
-                                     assignedChartSymbol,
-                                     assignedCoordinatorKey,
-                                     assignedCoordinatorChartId,
-                                     assignedSignature,
-                                     assignedAt) &&
-            MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey) &&
-            !MBP_IsActiveWorkerSlotSignature(assignedSignature))
+         bool hasAssignment = MBP_ReadWorkerAssignment(chartId,
+                                                       assignedSymbol,
+                                                       assignedSymbolsCsv,
+                                                       assignedChartSymbol,
+                                                       assignedCoordinatorKey,
+                                                       assignedCoordinatorChartId,
+                                                       assignedSignature,
+                                                       assignedAt);
+
+         if(hasAssignment && MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey))
          {
-            ResetLastError();
-            if(ChartClose(chartId))
+            string closeReason = "";
+            bool shouldClose = false;
+
+            // Stale signature: coordinator's slot list no longer contains this assignment
+            if(!MBP_IsActiveWorkerSlotSignature(assignedSignature))
             {
-               string assignmentFile = MBP_WorkerAssignmentFile(chartId);
-               if(FileIsExist(assignmentFile, FILE_COMMON))
-                  FileDelete(assignmentFile, FILE_COMMON);
-               Print(EmojiWarning(), " Closed inactive worker chart ", chartId,
-                     " for old assignment ", assignedSignature, ".");
+               shouldClose = true;
+               closeReason = "stale signature " + assignedSignature;
             }
-            else if(_LastError == 4102)
+            else
             {
-               string assignmentFile = MBP_WorkerAssignmentFile(chartId);
-               if(FileIsExist(assignmentFile, FILE_COMMON))
-                  FileDelete(assignmentFile, FILE_COMMON);
+               // Active signature but heartbeat dead → worker EA crashed or hung
+               datetime heartbeat = 0;
+               long heartbeatChartId = 0;
+               string heartbeatSymbolsCsv = "";
+               string heartbeatSignature = "";
+               string heartbeatState = "";
+               if(MBP_ReadWorkerHeartbeat(assignedSymbol,
+                                          coordinatorKey,
+                                          heartbeat,
+                                          heartbeatChartId,
+                                          heartbeatSymbolsCsv,
+                                          heartbeatSignature,
+                                          heartbeatState))
+               {
+                  // Tolerate RELOADING state (template/recompile in progress).
+                  bool reloading = (StringCompare(heartbeatState, "RELOADING", false) == 0);
+                  // Only trigger staleness if this heartbeat was published by THIS chart.
+                  // If it came from a previous worker (different chart ID), the new worker
+                  // hasn't had a chance to publish yet — rely on boot grace instead of
+                  // killing it based on the old worker's stale GV timestamp.
+                  bool heartbeatFromThisChart = (heartbeatChartId <= 0 || heartbeatChartId == chartId);
+                  if(!reloading && heartbeatFromThisChart && heartbeat > 0 && (TimeCurrent() - heartbeat) > 60)
+                  {
+                     // Give newly-assigned charts a 180-second boot grace period.
+                     // History builds (especially BTCUSD Renko with DLL) can take 140+s
+                     // before the first heartbeat is published.
+                     bool inBootGrace = (assignedAt > 0 && (TimeCurrent() - assignedAt) < 180);
+                     if(!inBootGrace)
+                     {
+                        shouldClose = true;
+                        closeReason = StringFormat("heartbeat stale %ds", (int)(TimeCurrent() - heartbeat));
+                     }
+                  }
+               }
+            }
+
+            if(shouldClose)
+            {
+               ResetLastError();
+               if(ChartClose(chartId))
+               {
+                  string assignmentFile = MBP_WorkerAssignmentFile(chartId);
+                  if(FileIsExist(assignmentFile, FILE_COMMON))
+                     FileDelete(assignmentFile, FILE_COMMON);
+                  Print(EmojiWarning(), " Closed worker chart ", chartId,
+                        " — reason: ", closeReason, ".");
+               }
+               else if(_LastError == 4102)
+               {
+                  string assignmentFile = MBP_WorkerAssignmentFile(chartId);
+                  if(FileIsExist(assignmentFile, FILE_COMMON))
+                     FileDelete(assignmentFile, FILE_COMMON);
+               }
             }
          }
       }
@@ -2720,7 +2949,7 @@ void MasterEnsureRuntimeWorkers()
       return;
 
    ulong nowMs = GetTickCount();
-   uint ensureIntervalMs = 1000;
+   uint ensureIntervalMs = 500; // Faster recovery for dead workers
    if((nowMs - G_LastWorkerEnsureMs) < ensureIntervalMs)
       return;
 
@@ -2736,6 +2965,17 @@ void MasterEnsureRuntimeWorkers()
    ENUM_TIMEFRAMES targetPeriod = (ENUM_TIMEFRAMES)ChartPeriod(0);
    string coordinatorKey = MBP_GetActiveCoordinatorKey();
    MBP_CloseInactiveWorkerCharts(coordinatorKey);
+
+   // After the close pass, invalidate any slot whose tracked chart is no longer
+   // alive. This prevents the ensure loop below from "re-assigning" to a chart
+   // that was just closed (it can remain MBP_IsChartAlive for a few seconds
+   // while its EA is still deinitializing), which would block opening a fresh one.
+   for(int j = 0; j < ArraySize(G_WorkerSlots); j++)
+   {
+      long tracked = G_WorkerSlots[j].chartId;
+      if(tracked > 0 && !MBP_IsChartAlive(tracked))
+         G_WorkerSlots[j].chartId = 0;
+   }
 
    for(int i = 0; i < ArraySize(G_WorkerSlots); i++)
    {
@@ -2810,6 +3050,14 @@ void MasterEnsureRuntimeWorkers()
 
       if(targetChartId <= 0)
       {
+         // Throttle: don't open a new chart within 60s of the last launch attempt.
+         // This prevents rapid open/close churn when a worker is repeatedly killed
+         // before it can publish its first heartbeat (e.g. during history replay).
+         if(G_WorkerSlots[i].lastLaunchAttemptMs > 0 &&
+            (nowMs - G_WorkerSlots[i].lastLaunchAttemptMs) < 60000)
+         {
+            continue;
+         }
          targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
          newlyAssigned = true;
          templateRequired = true;
@@ -2871,7 +3119,8 @@ void MasterEnsureRuntimeWorkers()
                                     G_WorkerSlots[i].symbolsCsv,
                                     workerChartSymbol,
                                     coordinatorKey,
-                                    G_WorkerSlots[i].assignmentSignature))
+                                    G_WorkerSlots[i].assignmentSignature,
+                                    i))
       {
          Print(EmojiWarning(), " Failed to stamp worker assignment for ", baseSymbol, " on chart ", targetChartId);
          continue;
@@ -2971,15 +3220,17 @@ void ShadowMaster_Supervise(const bool forceLaunch = false)
    if(!ShadowMaster_WriteRuntimeConfig(true))
       return;
 
-   if(G_PythonBridge.BootShadowMaster(runtimePath))
-   {
-      G_LastShadowLaunchAttemptMs = nowMs;
+   // CRITICAL: stamp the launch attempt BEFORE invoking the launcher. Whether the
+   // .exe is healthy or not, we should engage the 15-min cooldown so a broken
+   // binary (LFS pointer, stub, etc.) doesn't trigger relaunch every 30 seconds.
+   // Previously this was set only on success, so any persistent launch failure
+   // produced a continuous spam of "Starting standalone ShadowMaster..." lines.
+   G_LastShadowLaunchAttemptMs = nowMs;
+
+   if(G_AIBridge.BootShadowMaster(runtimePath))
       MarkShadowMasterPulse(false, "Shadow runtime launch requested");
-   }
    else
-   {
-      MarkShadowMasterPulse(false, "Shadow runtime launch failed");
-   }
+      MarkShadowMasterPulse(false, "Shadow runtime launch failed (see log for details)");
 }
 
 bool SmartHedge_IsEnabled()
@@ -4064,6 +4315,7 @@ int Master_OnInit()
       {
        G_LicenseValid = true;
       Print(EmojiLock(), " Worker runtime detected. Reusing coordinator license session.");
+      Print(EmojiWarning(), " Note: Input parameters on worker charts are ignored. Configuration is coordinated by the Coordinator/Master chart.");
      }
    else if(!VerifyLicense())
    {
@@ -4132,6 +4384,8 @@ int Master_OnInit()
    G_FastChartSwitchMode = ConsumeFastChartSwitchPending();
    if(G_FastChartSwitchMode)
       RestoreFastChartSwitchDashboardState();
+
+   G_Coordinator.Initialize();
 
    Print(EmojiBrain(), " Analysis symbol: ", _Symbol);
    Print(EmojiBrain(), " Execution symbol: ", RealSymbol);
@@ -4223,7 +4477,21 @@ int Master_OnInit()
 
 // 6. Set trade parameters
    Trade.SetDeviationInPoints(Slippage);
-   Trade.SetExpertMagicNumber(MagicNumber);
+
+   // Compute effective magic — workers offset by index*STRIDE so each worker's
+   // CloseByMagic only touches its own positions. Coordinator/legacy keep base magic.
+   if(IsParallelWorkerMode() && G_RuntimeWorkerIndex >= 0 &&
+      G_RuntimeWorkerIndex < MBP_WORKER_MAGIC_MAX_OFFSETS)
+   {
+      G_EffectiveMagicNumber = (long)MagicNumber + (long)G_RuntimeWorkerIndex * MBP_WORKER_MAGIC_STRIDE;
+      Print(EmojiBrain(), " Worker ", G_RuntimeWorkerIndex,
+            " effective magic: ", G_EffectiveMagicNumber, " (base ", MagicNumber, ").");
+   }
+   else
+   {
+      G_EffectiveMagicNumber = (long)MagicNumber;
+   }
+   Trade.SetExpertMagicNumber(G_EffectiveMagicNumber);
 
 // 7. Initialize Global Tracking
    LastGlobalDailyReset = TimeCurrent();
@@ -4495,7 +4763,47 @@ void Master_OnDeinit(const int reason)
    }
 
    if(IsParallelCoordinatorMode())
+   {
       MBP_PurgeWorkerLaunchMarkers();
+
+      // Skip chart-cleanup on hot reloads so we don't tear the system down
+      // for a recompile/template reapply that will return immediately.
+      if(!MBP_ShouldMarkWorkerReloadingOnDeinit(reason))
+      {
+         // Close every worker chart we spawned so the user doesn't have to.
+         for(int wi = 0; wi < ArraySize(G_WorkerSlots); wi++)
+         {
+            long workerChartId = G_WorkerSlots[wi].chartId;
+            if(workerChartId <= 0 || workerChartId == ChartID())
+               continue;
+            if(!MBP_IsChartAlive(workerChartId))
+               continue;
+
+            ResetLastError();
+            if(ChartClose(workerChartId))
+            {
+               string assignmentFile = MBP_WorkerAssignmentFile(workerChartId);
+               if(FileIsExist(assignmentFile, FILE_COMMON))
+                  FileDelete(assignmentFile, FILE_COMMON);
+               Print(EmojiBrain(), " Coordinator closed worker chart ", workerChartId, ".");
+            }
+            else
+            {
+               Print(EmojiWarning(), " Coordinator could not close worker chart ",
+                     workerChartId, " (error=", _LastError, ").");
+            }
+         }
+
+         // Drop the coordinator-alive heartbeat AND owner stamp so a sibling chart
+         // can reclaim the role immediately rather than waiting 5 seconds for staleness.
+         string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
+         string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
+         if(GlobalVariableCheck(coordAliveGV))
+            GlobalVariableDel(coordAliveGV);
+         if(GlobalVariableCheck(coordOwnerGV))
+            GlobalVariableDel(coordOwnerGV);
+      }
+   }
 
 // 2. Remove timer
    EventKillTimer();
@@ -4532,442 +4840,7 @@ bool MasterIsUiPriorityWindowActive()
 
 void Master_OnTimer()
 {
-   static ulong lastBankSaveMs = 0;
-   static ulong lastSyntheticPumpMs = 0;
-   static ulong lastDeferredHousekeepingMs = 0;
-   ulong timerNowMs = GetTickCount();
-   bool coordinatorMode = IsParallelCoordinatorMode();
-   bool workerMode = IsParallelWorkerMode();
-
-   MasterPublishWorkerHeartbeat();
-   MasterConsumeUiCommands();
-   if(coordinatorMode)
-      MasterEnsureRuntimeWorkers();
-
-   bool shouldManageDashboardUi = (!workerMode &&
-                                   (ShowManualSection || ShowTradeList || Panel_IsModifying || MQLInfoInteger(MQL_TESTER)));
-   bool uiPriorityActive = MasterIsUiPriorityWindowActive() || shouldManageDashboardUi;
-
-   if(ShowDashboard && !IsDragging && !G_DashboardDragArmed)
-   {
-      if(workerMode)
-      {
-         UpdateDashboard(0);
-      }
-      else if(shouldManageDashboardUi)
-      {
-         ManageManualSystem();
-      }
-      else
-      {
-         UpdateDashboard(0);
-         if(!DashboardCollapsed)
-         {
-            if(Panel_IsModifying) ManageModificationMode();
-            else ManageTradeListMode();
-         }
-         else if(!Panel_IsModifying)
-         {
-            ObjectsDeleteAll(0, BTN_PREFIX_LIST);
-         }
-      }
-   }
-
-   MasterProcessTradeControlLane();
-   ProcessBridgePendingRequest();
-   FlushBridgeSignalQueue();
-
-   uint bankSaveIntervalMs = uiPriorityActive ? 5000 : 1000;
-   if(timerNowMs - lastBankSaveMs >= bankSaveIntervalMs)
-   {
-      SaveAllBankStates();
-      lastBankSaveMs = timerNowMs;
-   }
-
-   if(!uiPriorityActive || (timerNowMs - lastDeferredHousekeepingMs) >= 5000)
-   {
-      if(ShadowMaster_ShouldOwnRuntime())
-         ShadowMaster_Supervise(false);
-      lastDeferredHousekeepingMs = timerNowMs;
-   }
-
-   int configuredPumpMs = MBP_IsRenkoDataMode(InpDataMode)
-                          ? InpRenkoLivePoolMs
-                          : InpSyntheticPumpIntervalMs;
-   uint syntheticPumpIntervalMs = (configuredPumpMs <= 0) ? 0 : (uint)configuredPumpMs;
-   uint effectivePumpIntervalMs = syntheticPumpIntervalMs;
-   if(uiPriorityActive)
-   {
-      if(effectivePumpIntervalMs == 0)
-         effectivePumpIntervalMs = 250;
-      else
-         effectivePumpIntervalMs = MathMax((uint)250, effectivePumpIntervalMs * 4);
-   }
-
-   if(!coordinatorMode &&
-      (effectivePumpIntervalMs == 0 ||
-       lastSyntheticPumpMs == 0 ||
-       (timerNowMs - lastSyntheticPumpMs) >= effectivePumpIntervalMs))
-   {
-      MasterPumpRuntimeServices();
-      MasterPumpTimerServices();
-      lastSyntheticPumpMs = timerNowMs;
-   }
-
-   if(!coordinatorMode &&
-      !MasterIsUiPriorityWindowActive() &&
-      !MasterHasPendingTradeControlJob())
-      ProcessDeferredBoxHistoryWarmup();
-
-   // --- CONTINUOUS LICENSE VERIFICATION ---
-   if(!workerMode)
-   {
-      static int auth_timer_ticks = 0;
-      auth_timer_ticks++;
-      if(auth_timer_ticks >= 28800) 
-      {
-         Print(EmojiBrain(), " Running background license verification...");
-         if(!VerifyLicense())
-         {
-            Print(EmojiWarning(), " Subscription expired mid-session. Executing a hard shutdown.");
-            // ... (keep the rest of the shutdown loop)
-            for(int i=0; i<ArraySize(SymbolData); i++)
-            {
-               if(SymbolData[i].active)
-               {
-                  CloseAllGridPositions(i, "License Expired");
-                  ResetGridTracking(i);
-               }
-            }
-            CloseAllGlobalPositions("License Expired");
-            ExpertRemove(); 
-         }
-         auth_timer_ticks = 0;
-      }
-   }
-     
-   // --- STRATEGY TESTER CHART MANAGER ---
-   MasterHandleTesterCharts();
-
-   if(MQLInfoInteger(MQL_TESTER) && !workerMode)
-      MasterPollDashboardButtons();
-
-   if(ForceTimerExecution && !MasterIsUiPriorityWindowActive() && !coordinatorMode)
-      Master_OnTick();
-
-   // ==================================================================
-   // VWAP & GLOBAL DAILY UPDATES (Synchronized to NY Time)
-   // ==================================================================
-   
-   // 1. Calculate Core Times
-   datetime gmtTime = TimeGMT();
-   int ny_offset_seconds = (-5 + InpNYManualShift) * 3600; 
-   datetime nyTime = gmtTime + ny_offset_seconds;
-   
-   MqlDateTime dt_ny;
-   TimeToStruct(nyTime, dt_ny);
-
-   // 2. Calculate "Trading Session" Time (Maps Midnight to 5 PM NY)
-   datetime sessionTime = nyTime + (7 * 3600);
-   MqlDateTime dt_session;
-   TimeToStruct(sessionTime, dt_session);
-
-   static int last_minute = -1;
-   static int last_trading_day = -1;
-
-   if(!coordinatorMode && dt_ny.min != last_minute)
-   {
-      last_minute = dt_ny.min;
-      
-      for(int i = 0; i < ArraySize(SymbolData); i++)
-      {
-         if(SymbolData[i].active && ShouldUpdateVWAPRuntime()) UpdateVWAP(i);
-      }
-
-      // Initialize the tracking day on the very first run
-      if(last_trading_day == -1) last_trading_day = dt_session.day_of_year;
-
-      // 3. 5 PM NY Rollover Check
-      if(dt_session.day_of_year != last_trading_day)
-      {
-         last_trading_day = dt_session.day_of_year;
-         
-         for(int i = 0; i < ArraySize(SymbolData); i++)
-         {
-            if(SymbolData[i].active)
-            {
-               SymbolData[i].DailyProfitLoss = 0;
-               SymbolData[i].LastDailyReset = TimeCurrent(); // Internal timestamp can remain server time
-               SymbolData[i].NewVWAPHighLowSet = false; 
-            }
-         }
-
-         DailyGlobalProfit = 0;
-         DailyGlobalLoss = 0;
-         LastGlobalDailyReset = TimeCurrent();
-      }
-   }
-
-   // ==================================================================
-   // MOVED FROM ONTICK: SHADOW MASTER SYNC HANDSHAKE 
-   // ==================================================================
-   if(InpEnableShadowMaster && !workerMode && GetTickCount() - G_LastShadowSyncCheck > 5000) 
-   {
-       static datetime lastSyncDetected = 0;
-       string syncFile = "ShadowSync.json";
-
-       if(FileIsExist(syncFile))
-       {
-           datetime fileTime = (datetime)FileGetInteger(syncFile, FILE_MODIFY_DATE);
-           if(fileTime > lastSyncDetected)
-           {
-               Print(EmojiBrain(), " Shadow master sync detected. Reloading configs...");
-               for(int i = 0; i < ArraySize(SymbolData); i++) 
-               {
-                   if(SymbolData[i].active) LoadShadowConfig(i);
-               }
-               MarkIndicatorOverlayDirty();
-               lastSyncDetected = fileTime;
-               MarkShadowMasterPulse(true, "Shadow sync refreshed");
-           }
-       }
-       else
-       {
-           MarkShadowMasterPulse(false, "Shadow sync file not found");
-       }
-       G_LastShadowSyncCheck = GetTickCount();
-   }
-
-   // ==================================================================
-   // MOVED FROM ONTICK: HEDGE MASTER & SYSTEM BLOCK CHECKS
-   // ==================================================================
-   bool isSystemBlocked = false;
-
-   // A. Check Hedge HARD Block (Limits)
-   if(GlobalVariableCheck(InpHedgeChannel + "_STOP_FLAG") && GlobalVariableGet(InpHedgeChannel + "_STOP_FLAG") > 0.0)
-   {
-      static long last_warn_stop = 0;
-      if(GetTickCount() - last_warn_stop > 86400000) {
-         Print(EmojiWarning(), " Trading blocked: master limits reached.");
-         last_warn_stop = GetTickCount();
-      }
-      RemoveSignalArrows();
-      isSystemBlocked = true;
-   }
-
-   // B. Check Hedge PAUSE (Cooldown/Security)
-   if(!isSystemBlocked && GlobalVariableCheck(InpHedgeChannel + "_PAUSE_FLAG") && GlobalVariableGet(InpHedgeChannel + "_PAUSE_FLAG") > 0.0)
-   {
-      static long last_warn_pause = 0;
-      if(GetTickCount() - last_warn_pause > 7200000) { 
-         Print(EmojiWarning(), " Trading paused: master security cooldown.");
-         Comment(EmojiWarning() + " Master cooldown active");
-          last_warn_pause = GetTickCount();
-      }
-      isSystemBlocked = true;
-   }
-   else if(!isSystemBlocked) {
-      string c = "";
-      ChartGetString(0, CHART_COMMENT, c);
-      string cu = c;
-      StringToUpper(cu);
-          Comment("");
-   }
-
-   // C. Global Safety Checks
-   if(!isSystemBlocked && !GlobalTradingEnabled) isSystemBlocked = true;
-   
-   G_Cache_SystemBlocked = isSystemBlocked; // Update Cache
-
-   // ==================================================================
-   // ?? MOVED FROM ONTICK: TIME & NEWS CALCULATIONS
-   // ==================================================================
-   bool isFridayStop = false;
-   if(UseFridayHardStop && dt_ny.day_of_week == 5)
-   {
-      if(IsInsideInterval(FridayStop_StartHour, FridayStop_StartMinute, FridayStop_EndHour, FridayStop_EndMinute, dt_ny))
-         isFridayStop = true;
-   }
-
-   // Evaluate scheduled blocks strictly against New York Time
-   G_Cache_IsDailyCloseBlock = IsInsideInterval(CloseBlock_StartHour, CloseBlock_StartMinute, CloseBlock_EndHour, CloseBlock_EndMinute, dt_ny);
-// Update the G_Cache_IsHardBlock assignment to use the new variable:
-   G_Cache_IsHardBlock = (UseCloseBlock && G_Cache_IsDailyCloseBlock) || isFridayStop;
-   G_Cache_BlockReason = isFridayStop ? "Friday Hard Stop Activated" : "Hard Close Block Activated";
-   
-   G_Cache_IsTradingTime = IsTradingTime();
-   G_Cache_IsNewsTime = IsNewsTime(); 
-
-   // Visual Updates
-   if(NewsWindowColorEnable && G_Cache_IsNewsTime) HighlightActiveNewsBar();
-   DrawNewsLines();
-
-   // ==================================================================
-   // --- INTEGRATED HEDGE MASTER ENGINE (Existing Logic) ---
-   // ==================================================================
-   string MasterFile = GetMasterFile(InpHedgeChannel);
-   string SlaveFile  = GetSlaveFile(InpHedgeChannel);
-   string ResetFile  = "HedgeReset_" + InpHedgeChannel + ".bin";
-   string FeedbackFile = GetFeedbackFile(InpHedgeChannel);
-
-   // A0. Consume slave feedback
-   if(IsBridgeRuntimeEnabled() && InpV3_EnableSQLiteBridge)
-   {
-      int feedbackProcessed = 0;
-      while(feedbackProcessed < MBP_MAX_FEEDBACK_ROWS_PER_TIMER)
-      {
-         long feedbackRowId = -1;
-         HedgeFeedback fb;
-         string feedbackNote = "";
-         if(!V3_SelectPendingFeedbackRow(InpV3_SQLitePath, InpHedgeChannel, feedbackRowId, fb, feedbackNote))
-            break;
-
-         ProcessBridgeFeedbackRecord(fb, feedbackNote);
-         V3_MarkFeedbackConsumed(InpV3_SQLitePath, feedbackRowId);
-         feedbackProcessed++;
-      }
-   }
-
-   if(FileIsExist(FeedbackFile, FILE_COMMON))
-      ProcessBridgeFeedbackFileBatch(FeedbackFile, MBP_MAX_FILE_FEEDBACK_PER_TIMER);
-
-   // A0b. Cooldown timer lifecycle
-   bool bridgePaused = false;
-   string pauseVar = InpHedgeChannel + "_PAUSE_FLAG";
-   string cooldownVar = InpHedgeChannel + "_COOLDOWN_TIMER";
-   if(GlobalVariableCheck(cooldownVar))
-   {
-      double resumeAt = GlobalVariableGet(cooldownVar);
-      if((double)TimeCurrent() < resumeAt)
-      {
-         bridgePaused = true;
-         GlobalVariableSet(pauseVar, 1.0);
-      }
-      else
-      {
-         GlobalVariableDel(cooldownVar);
-         if(GlobalVariableCheck(pauseVar)) GlobalVariableDel(pauseVar);
-      }
-   }
-   else if(GlobalVariableCheck(pauseVar)) GlobalVariableDel(pauseVar);
-
-   // A. Check if Slave sent a Reset Command
-   if(FileIsExist(ResetFile, FILE_COMMON)) {
-       int hRst = FileOpenRobust(ResetFile, FILE_READ|FILE_BIN|FILE_COMMON);
-       if(hRst != INVALID_HANDLE) {
-           CurrentResetID = FileReadLong(hRst);
-           FileClose(hRst);
-           FileDelete(ResetFile, FILE_COMMON);
-           MasterStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-           m_day_start_equity = AccountInfoDouble(ACCOUNT_EQUITY);
-                          
-           if (InpMasterRiskMode == RISK_TRAILING) {
-               double base = (InpStartingBalance > 0) ? InpStartingBalance : MasterStartEquity;
-               EffectiveMasterRisk = base * (InpTrailPercent / 100.0);
-           }
-           
-           GlobalVariableSet(InpHedgeChannel+"_MasterStartEq", MasterStartEquity);
-           GlobalVariableSet(InpHedgeChannel+"_MasterDayEq", m_day_start_equity);
-           
-           m_daily_stop_hit = false;
-           m_total_stop_hit = false;
-           g_HighWaterMark = (InpStartingBalance > 0) ? InpStartingBalance : MasterStartEquity;
-           g_TrailingStopLevel = g_HighWaterMark * (1.0 - (InpTrailPercent / 100.0));
-           SmartHedge_ResetAll();
-       }
-   }
-
-   // B. Daily Rollover Check (5 PM NY Time via dt_session)
-   if(dt_session.day_of_year != m_current_day_of_year) {
-       m_current_day_of_year = dt_session.day_of_year;
-       m_day_start_equity = AccountInfoDouble(ACCOUNT_EQUITY);
-       m_daily_stop_hit = false;
-       GlobalVariableSet(InpHedgeChannel+"_MasterDayEq", m_day_start_equity);
-       GlobalVariableSet(InpHedgeChannel+"_MasterDayOfYear", m_current_day_of_year);
-       SmartHedge_ResetDailyBaselines();
-   }
-   if(!workerMode)
-   {
-      // C. Update Stop Flags
-      double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-      double totalPnL = currentEquity - MasterStartEquity;
-      double dailyPnL = currentEquity - m_day_start_equity;
-      SmartHedge_ReconcileProtectedTrades();
-      SmartHedge_ApplyPnLAdjustments(totalPnL, dailyPnL);
-
-      // ?? ONLY trigger limits if the Bridge is ON ??
-      if(IsBridgeRuntimeEnabled())
-        {
-         if (totalPnL <= -InpMasterRisk) m_total_stop_hit = true;
-         if (dailyPnL <= -InpMasterDailyLoss) m_daily_stop_hit = true;
-         
-         if (InpMasterRiskMode == RISK_TRAILING) {
-             if (currentEquity > g_HighWaterMark) {
-                 g_HighWaterMark = currentEquity;
-                 g_TrailingStopLevel = g_HighWaterMark * (1.0 - (InpTrailPercent / 100.0));
-             }
-             if (currentEquity <= g_TrailingStopLevel) m_total_stop_hit = true;
-         }
-        }
-      else
-        {
-         // Bridge is OFF: Ensure flags stay false so local grids are never blocked
-         m_total_stop_hit = false;
-         m_daily_stop_hit = false;
-         
-         // Keep HighWaterMark updating silently in the background just in case you turn the Bridge ON mid-session
-         if (InpMasterRiskMode == RISK_TRAILING && currentEquity > g_HighWaterMark) {
-             g_HighWaterMark = currentEquity;
-             g_TrailingStopLevel = g_HighWaterMark * (1.0 - (InpTrailPercent / 100.0));
-         }
-        }
-
-      GlobalVariableSet(InpHedgeChannel + "_STOP_FLAG", (m_total_stop_hit || m_daily_stop_hit) ? 1.0 : 0.0);
-      
-      // D. Write State for Slave to Read
-      HedgeState state;
-      ZeroMemory(state);
-      state.master_current_equity = currentEquity;
-      state.master_start_equity = MasterStartEquity;
-      state.master_pnl = totalPnL;
-      state.master_balance_pnl = totalPnL;
-      state.master_daily_pnl = dailyPnL;
-      state.master_target_risk = EffectiveMasterRisk;
-      state.master_target_profit = InpMasterTargetProfit;
-      state.master_daily_limit = InpMasterDailyLoss;
-      state.master_daily_target = InpMasterDailyProfit;
-      state.slave_target_gain = InpSlaveGain;
-      state.is_daily_stopped = m_daily_stop_hit;
-      state.is_total_stopped = m_total_stop_hit;
-      state.is_paused = (IsPaused || bridgePaused);
-      state.reset_id = CurrentResetID;
-      state.last_heartbeat = (ulong)TimeGMT();
-
-      if(IsBridgeRuntimeEnabled() && InpV3_EnableSQLiteBridge)
-         V3_WriteMasterStateRow(InpV3_SQLitePath, InpHedgeChannel, state);
-
-      int hOut = FileOpen(MasterFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
-      if(hOut != INVALID_HANDLE) { FileWriteStruct(hOut, state); FileClose(hOut); }
-
-      RefreshSystemSnapshot(G_Cache_SystemBlocked, G_Cache_IsTradingTime, G_Cache_IsNewsTime, G_Cache_IsHardBlock, G_Cache_BlockReason);
-      TouchMasterAnalysisEngineOnTimer();
-      WriteActiveTrades();
-      if(!coordinatorMode)
-      {
-         CheckSlaveConnection();
-         CheckMasterOrphans();
-      }
-      if(!coordinatorMode)
-      {
-         RefreshIndicatorOverlay(true);
-         RefreshCurrentChartBoxLines(false);
-      }
-   }
-   else if(workerMode)
-   {
-      RefreshIndicatorOverlay(false);
-      RefreshCurrentChartBoxLines(false);
-   }
+   G_Coordinator.ProcessCycle();
 }
 
 
@@ -4978,6 +4851,30 @@ void Master_OnTick()
 {
    if(G_IS_DEINIT || IsStopped()) return;
    if(!G_LicenseValid) return;
+
+   // --- WORKER COORDINATOR HEARTBEAT GUARD ---
+   // If we're a worker and the coordinator hasn't pinged its heartbeat for >10s,
+   // halt new entries so workers don't fly blind without system-wide risk control.
+   if(IsParallelWorkerMode() && G_RuntimeCoordinatorKey != "")
+   {
+      string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
+      if(GlobalVariableCheck(coordAliveGV))
+      {
+         ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
+         ulong nowMs    = GetTickCount64();
+         if(lastBeat > 0 && nowMs >= lastBeat && (nowMs - lastBeat) > 10000)
+         {
+            static ulong lastWarnMs = 0;
+            if(nowMs - lastWarnMs >= 30000)
+            {
+               Print(EmojiWarning(), " Worker pausing: coordinator heartbeat stale (",
+                     (nowMs - lastBeat) / 1000, "s). Halting trades until coordinator returns.");
+               lastWarnMs = nowMs;
+            }
+            return;
+         }
+      }
+   }
 
    ulong tickStartMs = GetTickCount();
    bool uiPanelActive = (ShowManualSection || ShowTradeList || Panel_IsModifying ||
@@ -5263,6 +5160,23 @@ void Master_OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeR
    if(IsParallelCoordinatorMode())
       return;
 
+   // WORKER COORDINATOR HEARTBEAT GUARD (mirrors the gate in Master_OnTick).
+   // If we're a worker and the coordinator is silent, suppress trade-transaction
+   // processing too — otherwise a paused worker still emits bridge signals for
+   // trades placed by another chart that filled in for the missing coordinator,
+   // producing the duplicate-emit pattern seen in the log.
+   if(IsParallelWorkerMode() && G_RuntimeCoordinatorKey != "")
+   {
+      string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
+      if(GlobalVariableCheck(coordAliveGV))
+      {
+         ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
+         ulong nowMs    = GetTickCount64();
+         if(lastBeat > 0 && nowMs >= lastBeat && (nowMs - lastBeat) > 10000)
+            return;
+      }
+   }
+
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
       ulong dealTicket = trans.deal;
@@ -5273,7 +5187,7 @@ void Master_OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeR
             return;
 
          ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-         
+
          // We only care when trades CLOSE (Entry Out)
          if(entryType == DEAL_ENTRY_OUT)
          {
@@ -5547,251 +5461,7 @@ void Master_OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeR
 //+------------------------------------------------------------------+
 void Master_OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
-   G_MasterUiPriorityUntilMs = GetTickCount() + 250;
-
-   if(id == CHARTEVENT_OBJECT_DRAG)
-   {
-      OnPanelDrag(sparam);
-      return;
-   }
-
-   if(id == CHARTEVENT_OBJECT_CLICK)
-   {
-      if(G_DashboardDragArmed && !IsDragging)
-      {
-         G_DashboardDragArmed = false;
-         DragInteractionX = 0;
-         DragInteractionY = 0;
-         ChartSetInteger(0, CHART_MOUSE_SCROLL, true);
-      }
-
-      if(StringFind(sparam, "Btn_") == 0)
-      {
-         int queuedSymbolIndex = -1;
-         int queuedCommand = MBP_UI_CMD_NONE;
-
-         if(sparam == "Btn_MasterReset") queuedCommand = MBP_UI_CMD_MASTER_RESET;
-         else if(sparam == "Btn_Pause") queuedCommand = MBP_UI_CMD_TOGGLE_PAUSE;
-         else if(sparam == "Btn_Collapse") queuedCommand = MBP_UI_CMD_TOGGLE_COLLAPSE;
-         else if(sparam == "Btn_Dash_Scale_P") queuedCommand = MBP_UI_CMD_DASH_SCALE_UP;
-         else if(sparam == "Btn_Dash_Scale_M") queuedCommand = MBP_UI_CMD_DASH_SCALE_DOWN;
-         else if(sparam == "Btn_ToggleMan") queuedCommand = MBP_UI_CMD_TOGGLE_MANUAL_SECTION;
-         else if(sparam == "Btn_ToggleList") queuedCommand = MBP_UI_CMD_TOGGLE_TRADE_LIST;
-         else if(sparam == "Btn_CloseAll") queuedCommand = MBP_UI_CMD_CLOSE_ALL;
-         else if(sparam == "Btn_CloseChart")
-         {
-            queuedCommand = MBP_UI_CMD_CLOSE_SYMBOL;
-            queuedSymbolIndex = ResolveDashboardFocusSymbolIndex();
-            if(queuedSymbolIndex < 0)
-            {
-               queuedSymbolIndex = GetSymbolIndex(_Symbol);
-               if(queuedSymbolIndex == -1)
-                  queuedSymbolIndex = GetSymbolIndex(RealSymbol);
-            }
-         }
-
-         if(queuedCommand != MBP_UI_CMD_NONE)
-         {
-            bool isImmediateUiCommand = (queuedCommand == MBP_UI_CMD_TOGGLE_PAUSE ||
-                                         queuedCommand == MBP_UI_CMD_TOGGLE_COLLAPSE ||
-                                         queuedCommand == MBP_UI_CMD_DASH_SCALE_UP ||
-                                         queuedCommand == MBP_UI_CMD_DASH_SCALE_DOWN ||
-                                         queuedCommand == MBP_UI_CMD_TOGGLE_MANUAL_SECTION ||
-                                         queuedCommand == MBP_UI_CMD_TOGGLE_TRADE_LIST);
-
-            if(!MQLInfoInteger(MQL_TESTER) && isImmediateUiCommand)
-            {
-               RememberDashboardButtonHandled(sparam);
-               MasterRaiseUiPriorityWindow(1200);
-
-               SMasterUiCommand immediateCmd;
-               ZeroMemory(immediateCmd);
-               immediateCmd.type = queuedCommand;
-               immediateCmd.symbolIndex = queuedSymbolIndex;
-               immediateCmd.buttonName = sparam;
-               MasterExecuteUiCommand(immediateCmd);
-            }
-            else
-            {
-               MasterEnqueueUiCommand(queuedCommand, queuedSymbolIndex, sparam);
-               ChartRedraw(0);
-            }
-            return;
-         }
-
-         RememberDashboardButtonHandled(sparam);
-      }
-
-      if(StringFind(sparam, "NewsLine_") >= 0 || StringFind(sparam, "NewsIcon_") >= 0)
-      {
-         string idStr = StringSubstr(sparam, 9);
-         ShowNewsDetails("NewsLine_" + idStr);
-      }
-      else if(StringFind(sparam, "Row_Sym_") == 0)
-      {
-         static string lastClickedSymObj = "";
-         static uint lastClickTimeSym = 0;
-         uint currentTime = GetTickCount();
-
-         if(sparam == lastClickedSymObj && (currentTime - lastClickTimeSym) < 500)
-         {
-            int idx = (int)StringToInteger(StringSubstr(sparam, 8));
-
-            if(idx >= 0 && idx < ArraySize(SymbolData))
-            {
-               string targetSymbol = ResolveManagedAnalysisSymbol(idx);
-               string targetBaseSymbol = (SymbolData[idx].BaseSymbol != "") ? SymbolData[idx].BaseSymbol : GetBaseSymbol(targetSymbol);
-               SetDashboardFocusSymbol(targetBaseSymbol);
-               if(targetSymbol == _Symbol)
-               {
-                  lastClickedSymObj = "";
-                  lastClickTimeSym = 0;
-                  return;
-               }
-               Print(EmojiMouse(), " Double click detected. Saving runtime state before the chart switch...");
-
-               for(int i = 0; i < ArraySize(SymbolData); i++)
-               {
-                  if(SymbolData[i].active)
-                     SaveBankState(i);
-               }
-
-               SaveBoxHistoryCache();
-               SaveFastChartSwitchDashboardState();
-               MarkFastChartSwitchPending();
-
-               Print(EmojiMouse(), " Runtime state saved. Switching chart to: ", targetSymbol);
-               if(G_LicenseValid)
-                  TouchLicenseCache((long)AccountInfoInteger(ACCOUNT_LOGIN));
-               MarkIndicatorOverlayDirty();
-               ChartSetSymbolPeriod(0, targetSymbol, _Period);
-            }
-            lastClickedSymObj = "";
-         }
-         else
-         {
-            lastClickedSymObj = sparam;
-            lastClickTimeSym = currentTime;
-         }
-      }
-   }
-
-   if(id == CHARTEVENT_MOUSE_MOVE)
-   {
-      if(sparam == "0" && !IsDragging && !G_DashboardDragArmed)
-         return;
-
-      static uint lastDraw = 0;
-      bool allowRedraw = (GetTickCount() - lastDraw > 30);
-
-      int mouseX = (int)lparam;
-      int mouseY = (int)dparam;
-      int mouseState = (int)StringToInteger(sparam);
-
-      if(!IsWorkerDashboardMode() && !DashboardCollapsed && !IsDragging && !G_DashboardDragArmed)
-      {
-         bool hoverChanged = false;
-
-         for(int i = 0; i < ArraySize(SymbolData); i++)
-         {
-            string symObj = "Row_Sym_" + IntegerToString(i);
-            if(ObjectFind(0, symObj) >= 0)
-            {
-               int objX = (int)ObjectGetInteger(0, symObj, OBJPROP_XDISTANCE);
-               int objY = (int)ObjectGetInteger(0, symObj, OBJPROP_YDISTANCE);
-               color currentColor = (color)ObjectGetInteger(0, symObj, OBJPROP_COLOR);
-
-               if(mouseX >= objX && mouseX <= objX + S_Dash(60) &&
-                  mouseY >= objY && mouseY <= objY + S_Dash(15))
-               {
-                  if(currentColor != clrWhite)
-                  {
-                     ObjectSetInteger(0, symObj, OBJPROP_COLOR, clrWhite);
-                     hoverChanged = true;
-                  }
-               }
-               else if(currentColor != clrYellow)
-               {
-                  ObjectSetInteger(0, symObj, OBJPROP_COLOR, clrYellow);
-                  hoverChanged = true;
-               }
-            }
-         }
-
-         if(hoverChanged && allowRedraw)
-         {
-            ChartRedraw(0);
-            lastDraw = GetTickCount();
-         }
-      }
-
-      int panelHeight = GetDashboardBottomY() - DashboardY;
-      if(panelHeight < S_Dash(30))
-         panelHeight = S_Dash(30);
-      int panelWidth = GetDashboardWidth();
-      bool mouseInPanel = (mouseX >= DashboardX && mouseX <= (DashboardX + panelWidth) &&
-                           mouseY >= DashboardY && mouseY <= (DashboardY + panelHeight));
-
-      if((mouseState & 1) == 1)
-      {
-         if(mouseInPanel)
-            ChartSetInteger(0, CHART_MOUSE_SCROLL, false);
-
-         if(mouseInPanel && !IsDragging && !G_DashboardDragArmed)
-         {
-            G_DashboardDragArmed = true;
-            G_DashboardDragStartX = mouseX;
-            G_DashboardDragStartY = mouseY;
-            DragInteractionX = mouseX - DashboardX;
-            DragInteractionY = mouseY - DashboardY;
-         }
-
-         if(G_DashboardDragArmed && !IsDragging)
-         {
-            int dragDistance = (int)MathMax(MathAbs(mouseX - G_DashboardDragStartX), MathAbs(mouseY - G_DashboardDragStartY));
-            if(dragDistance >= DASH_DRAG_THRESHOLD_PX)
-               IsDragging = true;
-         }
-
-         if(IsDragging)
-         {
-            int newX = mouseX - DragInteractionX;
-            int newY = mouseY - DragInteractionY;
-
-            if(newX < 0) newX = 0;
-            if(newY < 0) newY = 0;
-
-            DashboardX = newX;
-            DashboardY = newY;
-
-            if(allowRedraw)
-            {
-               if(InpLiveDragging)
-                  MoveDashboard(DashboardX, DashboardY);
-               else
-                  MoveDashboardFrameOnly(DashboardX, DashboardY);
-               ChartRedraw(0);
-               lastDraw = GetTickCount();
-            }
-         }
-      }
-      else
-      {
-         bool wasDragging = IsDragging;
-         if(IsDragging || G_DashboardDragArmed)
-         {
-            IsDragging = false;
-            G_DashboardDragArmed = false;
-            ChartSetInteger(0, CHART_MOUSE_SCROLL, true);
-
-            if(wasDragging)
-            {
-               MoveDashboard(DashboardX, DashboardY);
-               ChartRedraw();
-            }
-         }
-      }
-   }
+   G_Coordinator.OnChartEvent(id, lparam, dparam, sparam);
 }
 
 //+------------------------------------------------------------------+
@@ -6521,6 +6191,14 @@ int OnInit()
    ChartMode = MBP_DataModeToChartMode(InpDataMode);
    G_RuntimeRole = ResolveRuntimeRoleForCurrentChart();
    ResetSystemSnapshot();
+
+   // Initialize System State with current account equity
+   G_SystemState.SetDayStartEquity(AccountInfoDouble(ACCOUNT_EQUITY));
+   G_SystemState.SetHighWaterMark(AccountInfoDouble(ACCOUNT_EQUITY));
+   G_SystemState.SetMasterStartEquity(AccountInfoDouble(ACCOUNT_EQUITY));
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   G_SystemState.SetCurrentDayOfYear(dt.day_of_year);
 
    if(IsSlaveModeSelected())
    {

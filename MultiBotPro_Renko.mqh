@@ -5,8 +5,9 @@
 //|        Internal AZ-style Renko engine built on custom symbols    |
 //+------------------------------------------------------------------+
 #include "MultiBotPro_Defines.mqh"
+#include "MultiBotPro_CustomSymbolPublisher.mqh"
 
-class CRenkoEngine
+class CRenkoEngine : public CCustomSymbolPublisher
 {
 private:
    struct SAZRenkoProfile
@@ -17,7 +18,6 @@ private:
    };
 
    string   m_symbol;
-   string   m_customSymbol;
    string   m_gvPrefix;
 
    double   m_anchorPrice;
@@ -25,6 +25,7 @@ private:
    double   m_boxLow;
    bool     m_isTrendUp;
    datetime m_lastCommittedTime;
+   datetime m_lastCommittedCloseTime;
    datetime m_hardCommittedTime;
    datetime m_brickStartTime;
    datetime m_liveLogicalStartTime;
@@ -36,6 +37,7 @@ private:
    double   m_liveCandidateClose;
    double   m_lastClosePrice;
    double   m_currentBlockSizePoint;
+   double   m_lockedBlockSize;
    double   m_currentATR;
    double   m_lastLivePrice;
    double   m_lastSourceBid;
@@ -49,13 +51,8 @@ private:
    datetime m_livePreviewEndTime;
    datetime m_lastPublishedLiveBarTime;
    ulong    m_lastDirectPreviewPublishUs;
-   long     m_lastLiveTickMsc;
    long     m_lastLiveQuoteTickMsc;
    long     m_lastCommittedQuoteTickMsc;
-   bool     m_tickMirroringEnabled;
-   bool     m_tickMirrorWarningLogged;
-   int      m_tickMirrorFailureCount;
-   ulong    m_tickMirrorRetryAfterMs;
    ulong    m_lastAtrFetchMs;
    int      m_lastBrickDayOfYear;
    bool     m_isReplayingHistory;
@@ -65,6 +62,7 @@ private:
    bool     m_workerFailureLogged;
    string   m_workerSessionKey;
    double   m_workerSeedBlockSize;
+   ulong    m_workerLastReseedMs;
    long     m_workerLastSnapshotTickMsc;
    int      m_workerStallCount;
    ulong    m_livePreviewGeneration;
@@ -185,6 +183,8 @@ private:
    int DrainWorkerClosedBars();
    void BumpLivePreviewGeneration();
    void SaveState();
+   void ReconstructStateFromRatePair(const MqlRates &prev, const MqlRates &last);
+   bool ReconstructStateFromCustomSymbol();
    bool LoadState();
    void DrawActiveTradeLines(long magic);
    void DrawHistoryTrendLines();
@@ -197,6 +197,7 @@ CRenkoEngine::CRenkoEngine() :
    m_boxLow(0.0),
    m_isTrendUp(true),
    m_lastCommittedTime(0),
+   m_lastCommittedCloseTime(0),
    m_hardCommittedTime(0),
    m_brickStartTime(0),
    m_liveLogicalStartTime(0),
@@ -208,6 +209,7 @@ CRenkoEngine::CRenkoEngine() :
    m_liveCandidateClose(0.0),
    m_lastClosePrice(0.0),
    m_currentBlockSizePoint(0.0),
+   m_lockedBlockSize(0.0),
    m_currentATR(0.0),
    m_lastLivePrice(0.0),
    m_lastSourceBid(0.0),
@@ -221,22 +223,18 @@ CRenkoEngine::CRenkoEngine() :
    m_livePreviewEndTime(0),
    m_lastPublishedLiveBarTime(0),
    m_lastDirectPreviewPublishUs(0),
-   m_lastLiveTickMsc(0),
    m_lastLiveQuoteTickMsc(0),
    m_lastCommittedQuoteTickMsc(0),
-   m_tickMirroringEnabled(true),
-   m_tickMirrorWarningLogged(false),
-   m_tickMirrorFailureCount(0),
-   m_tickMirrorRetryAfterMs(0),
    m_lastAtrFetchMs(0),
    m_lastBrickDayOfYear(-1),
    m_isReplayingHistory(false),
-   m_workerSessionEnabled(false),
+   m_workerSessionEnabled(true),
    m_workerSessionReady(false),
    m_workerSessionDisabled(false),
    m_workerFailureLogged(false),
    m_workerSessionKey(""),
    m_workerSeedBlockSize(0.0),
+   m_workerLastReseedMs(0),
    m_workerLastSnapshotTickMsc(0),
    m_workerStallCount(0),
    m_livePreviewGeneration(1),
@@ -336,6 +334,18 @@ bool CRenkoEngine::PrepareStartup()
          ResetRuntimeState();
          EnsureAtrHandle();
          RefreshBlockSize(TimeCurrent(), true);
+      }
+   }
+
+   if(!resumed)
+   {
+      if(ReconstructStateFromCustomSymbol())
+      {
+         if(ConnectHistoryToLive())
+         {
+            resumed = true;
+            Print("[Renko] AZ-style self-healing resume for ", m_customSymbol);
+         }
       }
    }
 
@@ -461,6 +471,11 @@ void CRenkoEngine::ProcessTimer(const MqlTick &tick, const bool hasLiveTick)
    }
 
    RefreshBlockSize(TimeCurrent(), false);
+   if(m_flushPending && (GetTickCount() - m_lastFlushTryMs) > 1000)
+   {
+      FlushRamToDisk(true);
+   }
+
    if(m_lastFlushTime == 0 || (GetMicrosecondCount() - m_lastFlushTime) >= 1000000)
       FlushRamToDisk();
 }
@@ -482,10 +497,23 @@ bool CRenkoEngine::BuildHistory()
    Print("🧠 AZ-style Renko build: ", m_symbol, " -> ", m_customSymbol,
          " | Family=", RenkoFamilyToString(m_renkoFamily));
 
+   // SMART PROTECTION: If not forcing rebuild and we have data, try to resume instead of wiping.
+   if(!m_forceRebuild && Bars(m_customSymbol, PERIOD_M1) > 10)
+   {
+      if(ReconstructStateFromCustomSymbol())
+      {
+         datetime incrementalFrom = MathMax((datetime)0, m_lastCommittedTime - 7200);
+         Print("[Renko] Incremental build: existing history found for ", m_customSymbol,
+               ". Replaying from ", incrementalFrom, " (last brick ", m_lastCommittedTime, ")");
+         return ConnectHistoryToLive();
+      }
+   }
+
    ResetRuntimeState();
    EnsureAtrHandle();
    RefreshBlockSize(TimeCurrent(), true);
 
+   Print("[Renko] Hard Rebuild: Wiping custom symbol ", m_customSymbol);
    CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
    CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
 
@@ -493,14 +521,37 @@ bool CRenkoEngine::BuildHistory()
    m_lastCommittedTime = startTime - (startTime % 60);
    m_hardCommittedTime = m_lastCommittedTime;
 
-   bool replayOk = (m_histDataType == DATA_M1)
-                   ? ReplayRatesFrom(startTime, false)
-                   : ReplayTicksFrom(startTime, false);
+   bool replayOk = true;
+   if(m_histDataType == DATA_M1)
+   {
+      replayOk = ReplayRatesFrom(startTime, false);
+   }
+   else if(m_histDataType == DATA_TICK)
+   {
+      replayOk = ReplayTicksFrom(startTime, false);
+   }
+   else // DATA_HYBRID
+   {
+      datetime transitionTime = TimeCurrent() - 86400; // 24h
+      if(startTime < transitionTime)
+      {
+         Print("[Renko] Hybrid Stage 1: M1 deep history from ", startTime);
+         replayOk = ReplayRatesFrom(startTime, false);
+         if(replayOk)
+            m_lastCommittedTime = transitionTime - (transitionTime % 60);
+      }
+      
+      if(replayOk)
+      {
+         Print("[Renko] Hybrid Stage 2: Tick precision from ", transitionTime);
+         replayOk = ReplayTicksFrom(transitionTime, true);
+      }
+   }
 
    if(!replayOk)
    {
       Print("[Renko] WARNING: Failed to build history for ", m_symbol,
-            " using ", (m_histDataType == DATA_M1 ? "M1" : "Ticks"));
+            " using ", (m_histDataType == DATA_M1 ? "M1" : (m_histDataType == DATA_TICK ? "Ticks" : "Hybrid")));
       return false;
    }
 
@@ -548,6 +599,7 @@ void CRenkoEngine::ResetRuntimeState()
    m_boxLow = 0.0;
    m_isTrendUp = true;
    m_lastCommittedTime = 0;
+   m_lastCommittedCloseTime = 0;
    m_hardCommittedTime = 0;
    m_brickStartTime = 0;
    m_liveLogicalStartTime = 0;
@@ -559,6 +611,7 @@ void CRenkoEngine::ResetRuntimeState()
    m_liveCandidateClose = 0.0;
    m_lastClosePrice = 0.0;
    m_currentBlockSizePoint = 0.0;
+   m_lockedBlockSize = 0.0;
    m_currentATR = 0.0;
    m_lastLivePrice = 0.0;
    m_lastSourceBid = 0.0;
@@ -567,18 +620,14 @@ void CRenkoEngine::ResetRuntimeState()
    m_lastFlushTime = 0;
    m_lastVisualUpdate = 0;
    m_livePreviewEndTime = 0;
-   m_lastPublishedLiveBarTime = 0;
-   m_lastLiveTickMsc = 0;
+   ResetPublisherState();
+      
    m_lastLiveQuoteTickMsc = 0;
    m_lastCommittedQuoteTickMsc = 0;
-   m_tickMirroringEnabled = true;
-   m_tickMirrorWarningLogged = false;
-   m_tickMirrorFailureCount = 0;
-   m_tickMirrorRetryAfterMs = 0;
    m_lastAtrFetchMs = 0;
    m_lastBrickDayOfYear = -1;
    m_isReplayingHistory = false;
-   m_workerSessionEnabled = false;
+   // m_workerSessionEnabled is explicitly NOT reset here so the EA doesn't drop the setting inherited from configuration.
    m_workerSessionReady = false;
    m_workerSessionDisabled = false;
    m_workerFailureLogged = false;
@@ -609,7 +658,19 @@ void CRenkoEngine::EnsureAtrHandle()
    }
 
    if(m_blockMode == BLOCK_MODE_ATR_PERCENT)
+   {
       m_atrHandle = iATR(m_symbol, m_atrTimeframe, m_atrPeriod);
+      if(m_atrHandle != INVALID_HANDLE)
+      {
+         // Warmup loop: wait for indicator thread to catch up during hard rebuilds
+         for(int i = 0; i < 5; i++)
+         {
+            if(BarsCalculated(m_atrHandle) > 0)
+               break;
+            Sleep(50);
+         }
+      }
+   }
 }
 
 void CRenkoEngine::RefreshChartHandle()
@@ -722,6 +783,20 @@ void CRenkoEngine::RefreshBlockSize(const datetime timeRef, const bool force)
    }
 
    m_currentBlockSizePoint = CalculateBlockSize(timeRef);
+
+   // --- PYTHON AI SHADOW MASTER IPC HOOK ---
+   // Allows the external Python backend to dynamically override block sizes (e.g., expanding before news)
+   string pyGvName = "MBP_PY_BLOCKSIZE_" + m_symbol;
+   if(GlobalVariableCheck(pyGvName))
+   {
+      double pyOverrideSize = GlobalVariableGet(pyGvName);
+      if(pyOverrideSize > 0.0)
+      {
+         double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+         if(point <= 0.0) point = _Point;
+         m_currentBlockSizePoint = MathMax(NormalizePrice(pyOverrideSize * point), point);
+      }
+   }
 }
 
 double CRenkoEngine::CalculateBlockSize(const datetime timeRef)
@@ -871,11 +946,10 @@ datetime CRenkoEngine::ResolveCandidateStartTime(const datetime tickTime) const
 
 datetime CRenkoEngine::ResolvePublishedCandidateTime(const datetime logicalStartTime) const
 {
-   datetime published = logicalStartTime;
-   if(m_lastCommittedTime > 0)
+   datetime published = (logicalStartTime > 0) ? logicalStartTime : TimeCurrent();
+   
+   if(m_lastCommittedTime > 0 && published <= m_lastCommittedTime)
       published = m_lastCommittedTime + 1;
-   else if(published <= 0)
-      published = TimeCurrent();
 
    return published;
 }
@@ -896,10 +970,11 @@ datetime CRenkoEngine::ResolveLiveBarTime(const datetime fallbackTickTime) const
 
 datetime CRenkoEngine::ResolveCompletedBrickTime(const datetime tickTime) const
 {
-   datetime logicalTime = (m_liveLogicalStartTime > 0)
-                          ? m_liveLogicalStartTime
-                          : ResolveCandidateStartTime(tickTime);
-   return ResolvePublishedCandidateTime(logicalTime);
+   // Bar time = the timestamp of the last tick that completed this brick.
+   // This is consistent with the DLL path (which returns the completing-tick
+   // timestamp) and ensures history and live bars carry identical semantics.
+   datetime completing = (tickTime > 0) ? tickTime : TimeCurrent();
+   return ResolvePublishedCandidateTime(completing);
 }
 
 void CRenkoEngine::ClearLiveCandidate(const bool clearStartTime)
@@ -1018,7 +1093,10 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
    if(point <= 0.0)
       point = _Point;
 
-   double blockSize = MathMax(m_currentBlockSizePoint, point);
+   if(m_lockedBlockSize <= 0.0)
+      m_lockedBlockSize = MathMax(m_currentBlockSizePoint, point);
+
+   double blockSize = m_lockedBlockSize;
    double reversalDistance = CalculateReversalDistance(blockSize);
    bool created = false;
    int loops = 0;
@@ -1118,8 +1196,10 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
          break;
 
       created = true;
-      m_boxHigh = m_anchorPrice;
-      m_boxLow = m_anchorPrice;
+      // BUG-R1 FIX: Carry the actual tick price into the next brick's wick tracking
+      // instead of resetting to anchor (which discards the real high/low).
+      m_boxHigh = MathMax(m_anchorPrice, normalizedPrice);
+      m_boxLow = MathMin(m_anchorPrice, normalizedPrice);
       if(m_isReplayingHistory)
       {
          ClearLiveCandidate();
@@ -1136,6 +1216,9 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
          m_liveCandidateTargetClose = 0.0;
          m_liveCandidateClose = m_anchorPrice;
       }
+      m_lockedBlockSize = MathMax(m_currentBlockSizePoint, point);
+      blockSize = m_lockedBlockSize;
+      reversalDistance = CalculateReversalDistance(blockSize);
       m_tickVolBuffer = 0;
    }
 
@@ -1169,7 +1252,9 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
       startTime = m_lastCommittedTime + 1;
 
    int idx = ArraySize(m_ramRateBuffer);
-   ArrayResize(m_ramRateBuffer, idx + 1, m_isReplayingHistory ? 4096 : 128);
+   // Optimization: Increase reserve to handle history/spikes efficiently
+   int reserve = m_isReplayingHistory ? 10000 : 512;
+   ArrayResize(m_ramRateBuffer, idx + 1, reserve);
 
    double brickOpen = NormalizePrice(open);
    double brickClose = NormalizePrice(close);
@@ -1182,6 +1267,9 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
       brickHigh = MathMax(high, bodyHigh);
       brickLow = MathMin(low, bodyLow);
    }
+   // Guarantee MT5 OHLC validity regardless of floating-point rounding
+   brickHigh = MathMax(brickHigh, bodyHigh);
+   brickLow  = MathMin(brickLow,  bodyLow);
 
    m_ramRateBuffer[idx].time = startTime;
    m_ramRateBuffer[idx].open = brickOpen;
@@ -1252,16 +1340,12 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
 
       DeletePublishedLivePreviewRate();
       PublishLivePreviewRate();
-      return;
    }
-
-   DeletePublishedLivePreviewRate();
-   if(m_lastCommittedTime > 0)
+   else if(m_liveStyle == MBP_RENKO_LIVE_SMALL_PHANTOM)
    {
-      CustomRatesDelete(m_customSymbol, m_lastCommittedTime + 1, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, ((long)m_lastCommittedTime + 1) * 1000, LONG_MAX);
+      // Phantom mode: ONLY visual overlay. NO history deletions.
+      DrawLivePreviewOverlay();
    }
-   DrawLivePreviewOverlay();
 }
 
 void CRenkoEngine::PublishLivePreviewRate()
@@ -1274,6 +1358,19 @@ void CRenkoEngine::PublishLivePreviewRate()
 
    double brickOpen, brickClose, brickHigh, brickLow;
    BuildLiveBrick(brickOpen, brickClose, brickHigh, brickLow);
+
+   // Don't publish a zero-body preview bar — it renders as a horizontal line and
+   // adds no directional information. This happens at the very start of a new brick
+   // before price has moved away from the anchor.
+   {
+      double pt = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      if(pt <= 0.0) pt = _Point;
+      if(MathAbs(brickClose - brickOpen) < pt * 0.5)
+      {
+         DeletePublishedLivePreviewRate();
+         return;
+      }
+   }
 
    datetime liveTickTime = (m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent();
    datetime previewTime = ResolveLiveBarTime(liveTickTime);
@@ -1508,65 +1605,30 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
    double brickOpen, brickClose, brickHigh, brickLow;
    BuildLiveBrick(brickOpen, brickClose, brickHigh, brickLow);
 
-   datetime liveTickTime = (m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent();
-   datetime startTime = ResolveLiveBarTime(liveTickTime);
-   if(startTime <= 0)
-      startTime = TimeCurrent();
-
    color barColor = ResolveLivePreviewColor(chartId, brickClose >= brickOpen);
    string bodyName = LivePreviewBodyName();
-   string wickName = LivePreviewWickName();
-   datetime prevTime = (m_lastCommittedTime > 0) ? m_lastCommittedTime : (startTime - 1);
-   datetime prevPrevTime = (prevTime > 0) ? (prevTime - 1) : prevTime;
 
-   int xPrev = 0, yPrev = 0;
-   int xPrevPrev = 0, yPrevPrev = 0;
-   int xDummy = 0, yTop = 0, yBottom = 0;
-   if(!ChartTimePriceToXY(chartId, 0, prevTime, brickOpen, xPrev, yPrev) ||
-      !ChartTimePriceToXY(chartId, 0, prevPrevTime, brickOpen, xPrevPrev, yPrevPrev) ||
-      !ChartTimePriceToXY(chartId, 0, prevTime, brickHigh, xDummy, yTop) ||
-      !ChartTimePriceToXY(chartId, 0, prevTime, brickLow, xDummy, yBottom))
+   // Positioning: Start exactly 1s after the last committed bar.
+   // End is set to +60s to ensure visibility on M1 charts.
+   datetime tStart = (m_lastCommittedTime > 0) ? (m_lastCommittedTime + 1) : TimeCurrent();
+   datetime tEnd = tStart + 60; 
+
+   if(ObjectFind(chartId, bodyName) < 0)
    {
-      DeleteLivePreviewOverlayOnChart(chartId);
-      return;
+      ObjectCreate(chartId, bodyName, OBJ_RECTANGLE, 0, 0, 0, 0, 0);
+      ObjectSetInteger(chartId, bodyName, OBJPROP_BACK, false);
+      ObjectSetInteger(chartId, bodyName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(chartId, bodyName, OBJPROP_FILL, true);
+      ObjectSetInteger(chartId, bodyName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(chartId, bodyName, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(chartId, bodyName, OBJPROP_ZORDER, 100);
    }
 
-   long chartWidth = 0;
-   ChartGetInteger(chartId, CHART_WIDTH_IN_PIXELS, 0, chartWidth);
-
-   int slotWidth = MathAbs(xPrev - xPrevPrev);
-   if(slotWidth <= 1)
-      slotWidth = 6;
-   int bodyWidth = MathMax(2, slotWidth - 1);
-   int bodyHeight = MathMax(2, MathAbs(yBottom - yTop));
-   int xLeft = xPrev + (slotWidth / 2);
-   if(chartWidth > 0)
-      xLeft = (int)MathMin((double)xLeft, (double)MathMax(0, (int)chartWidth - bodyWidth - 4));
-   int yUpper = MathMin(yTop, yBottom);
-
-   if(ObjectFind(chartId, bodyName) < 0 ||
-      ObjectGetInteger(chartId, bodyName, OBJPROP_TYPE) != OBJ_RECTANGLE_LABEL)
-   {
-      ObjectDelete(chartId, bodyName);
-      ObjectCreate(chartId, bodyName, OBJ_RECTANGLE, 0, 0, 0, 0, 0);
-      ObjectDelete(chartId, bodyName);
-      ObjectCreate(chartId, bodyName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_BACK, false);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_SELECTED, false);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_HIDDEN, true);
-    }
-
-   ObjectSetInteger(chartId, bodyName, OBJPROP_XDISTANCE, xLeft);
-   ObjectSetInteger(chartId, bodyName, OBJPROP_YDISTANCE, yUpper);
-   ObjectSetInteger(chartId, bodyName, OBJPROP_XSIZE, bodyWidth);
-   ObjectSetInteger(chartId, bodyName, OBJPROP_YSIZE, bodyHeight);
-   ObjectSetInteger(chartId, bodyName, OBJPROP_BGCOLOR, barColor);
+   ObjectSetInteger(chartId, bodyName, OBJPROP_TIME, 0, tStart);
+   ObjectSetDouble(chartId, bodyName, OBJPROP_PRICE, 0, brickOpen);
+   ObjectSetInteger(chartId, bodyName, OBJPROP_TIME, 1, tEnd);
+   ObjectSetDouble(chartId, bodyName, OBJPROP_PRICE, 1, brickClose);
    ObjectSetInteger(chartId, bodyName, OBJPROP_COLOR, barColor);
-   ObjectSetInteger(chartId, bodyName, OBJPROP_BORDER_COLOR, barColor);
-
-   ObjectDelete(chartId, wickName);
 
    ChartRedraw(chartId);
 }
@@ -1627,22 +1689,31 @@ void CRenkoEngine::FlushRamToDisk(bool force)
 
    DeletePublishedLivePreviewRate();
    ResetLastError();
+   m_lastFlushTryMs = GetTickCount();
+
    bool ratesOk = CustomRatesUpdate(m_customSymbol, m_ramRateBuffer, total);
    int rateErr = _LastError;
+   
    if(!ratesOk)
    {
-      Print("[Renko] WARNING: Buffered rate flush failed for ", m_customSymbol,
-            " | Bars: ", total, " (Err: ", rateErr, ")");
+      if(!m_flushPending)
+      {
+         Print("[Renko] WARNING: Buffered rate flush failed for ", m_customSymbol,
+               " | Bars: ", total, " (Err: ", rateErr, "). Flagged for retry.");
+      }
+      m_flushPending = true;
+      return;
    }
 
+   m_flushPending = false;
    m_hardCommittedTime = m_ramRateBuffer[total - 1].time;
    SaveState();
    ArrayFree(m_ramRateBuffer);
    m_lastFlushTime = GetMicrosecondCount();
 
-    RefreshChartHandle();
-    if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
-       ChartRedraw(m_chartID);
+   RefreshChartHandle();
+   if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
+      ChartRedraw(m_chartID);
 }
 
 bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommitted)
@@ -1665,6 +1736,111 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
    if(m_anchorPrice == 0.0 && total > 0)
       SeedFromFirstPrice(src[0].open, src[0].time);
 
+   if(UseWorkerSession())
+   {
+      if(EnsureWorkerSession())
+      {
+         // Use MBP_RenkoFeedRatesW: the DLL owns the family-aware OHLC sub-tick
+         // expansion logic (CLASSIC / MEDIAN / TURBO / HYBRID), so we pass one
+         // entry per M1 bar as [open, low/high-ordered, close] price + bar timeMs.
+         // The DLL applies the same BUG-R2 open-first ordering internally.
+         int bufferSize = total * 4;  // max 4 synthetic ticks per bar
+         double prices[];
+         long times[];
+         ArrayResize(prices, bufferSize);
+         ArrayResize(times, bufferSize);
+
+         int validCount = 0;
+         datetime lastBarTimeTmp = (total > 0) ? src[0].time : 0;
+         for(int i = 0; i < total; i++)
+         {
+            if(skipCommitted && src[i].time <= m_lastCommittedTime)
+               continue;
+
+            if(src[i].time - lastBarTimeTmp > 14400)
+            {
+               datetime snapped = src[i].time - (src[i].time % 60);
+               if(snapped > m_lastCommittedTime)
+                  m_lastCommittedTime = snapped - 60;
+            }
+            lastBarTimeTmp = src[i].time;
+
+            long baseTimeMsc = (long)src[i].time * 1000;
+
+            // Spread the 4 synthetic ticks across the 60-second M1 window (0/20/40/59s)
+            // so bricks that complete at different ticks receive distinct second-level
+            // timestamps. This prevents all bricks from an M1 bar clustering at t+0,
+            // which would produce narrow bars separated by 57-second visual gaps on the
+            // Renko chart.  The ordering (open → adverse → favourable → close) mirrors
+            // the BUG-R2 MQL5 fallback so the DLL sees the same brick sequence.
+            prices[validCount] = src[i].open;  times[validCount] = baseTimeMsc;          validCount++;
+            if(src[i].close >= src[i].open)
+            {
+               prices[validCount] = src[i].low;  times[validCount] = baseTimeMsc + 20000; validCount++;
+               prices[validCount] = src[i].high; times[validCount] = baseTimeMsc + 40000; validCount++;
+            }
+            else
+            {
+               prices[validCount] = src[i].high; times[validCount] = baseTimeMsc + 20000; validCount++;
+               prices[validCount] = src[i].low;  times[validCount] = baseTimeMsc + 40000; validCount++;
+            }
+            prices[validCount] = src[i].close; times[validCount] = baseTimeMsc + 59000; validCount++;
+         }
+
+         if(validCount > 0)
+         {
+            ArrayResize(prices, validCount);
+            ArrayResize(times, validCount);
+            long lastFedTimeMsc = times[validCount - 1];
+            // Use the rates-specific DLL entry point so the backend can apply
+            // family-aware brick formation (CLASSIC/MEDIAN/TURBO/HYBRID).
+            if(MBP_RenkoFeedRatesW(m_workerSessionKey, m_customSymbol, prices, times, validCount) > 0)
+            {
+               // MBP_RenkoFeedRatesW is asynchronous: it enqueues and signals the
+               // background DLL worker thread. We must poll until lastTickMsc reaches
+               // the last fed timestamp before draining, or we'll get 0 bars back.
+               long histInfo[];
+               ArrayResize(histInfo, 4);
+               ulong pollStart = GetTickCount();
+               const ulong pollTimeoutMs = 30000; // 30s max wait
+               while((GetTickCount() - pollStart) < pollTimeoutMs)
+               {
+                  if(MBP_RenkoGetHistoryInfoW(m_workerSessionKey, m_customSymbol, histInfo) > 0)
+                  {
+                     if(histInfo[3] >= lastFedTimeMsc)
+                        break;
+                  }
+                  Sleep(5);
+               }
+               int totalDrained = 0;
+               int drainBatch;
+               while((drainBatch = DrainWorkerClosedBars()) > 0)
+                  totalDrained += drainBatch;
+               PullWorkerSnapshot();
+
+               if(totalDrained == 0)
+               {
+                  Print("[Renko] DLL M1 history produced 0 bricks for ", m_customSymbol,
+                        ". Falling back to MQL5 loop.");
+                  DisableWorkerSession("DLL M1 history produced 0 bricks");
+                  // fall through to MQL5 loop below
+               }
+               else
+               {
+                  m_isReplayingHistory = false;
+                  return true;
+               }
+            }
+            else
+            {
+               Print("[Renko] WARNING: DLL bulk M1 rates feed failed for ", m_customSymbol,
+                     ". Falling back to MQL5 ProcessRenkoTick loop.");
+               DisableWorkerSession("bulk rate feed failed");
+            }
+         }
+      }
+   }
+
    datetime lastBarTime = (total > 0) ? src[0].time : 0;
    for(int i = 0; i < total; i++)
    {
@@ -1679,19 +1855,26 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
       }
       lastBarTime = src[i].time;
 
-      long volPart = MathMax(1, src[i].tick_volume / 3);
+      long volPart = MathMax(1, src[i].tick_volume / 4);
       long baseTimeMsc = (long)src[i].time * 1000;
+
+      // Spread the 4 synthetic sub-ticks across the 60-second M1 window at 0, 20, 40,
+      // and 59 seconds. This mirrors the DLL path exactly so completed bricks carry the
+      // timestamp of the sub-tick that triggered completion (last-tick semantics).
+      // PushCompletedBrick updates m_lastCommittedTime for each brick, enforcing
+      // monotonicity without any outer time-override loop.
+      ProcessRenkoTick(src[i].open,  src[i].time,      volPart, baseTimeMsc);
       if(src[i].close >= src[i].open)
       {
-         ProcessRenkoTick(src[i].low, src[i].time, volPart, baseTimeMsc);
-         ProcessRenkoTick(src[i].high, src[i].time, volPart, baseTimeMsc + 1);
+         ProcessRenkoTick(src[i].low,  src[i].time + 20, volPart, baseTimeMsc + 20000);
+         ProcessRenkoTick(src[i].high, src[i].time + 40, volPart, baseTimeMsc + 40000);
       }
       else
       {
-         ProcessRenkoTick(src[i].high, src[i].time, volPart, baseTimeMsc);
-         ProcessRenkoTick(src[i].low, src[i].time, volPart, baseTimeMsc + 1);
+         ProcessRenkoTick(src[i].high, src[i].time + 20, volPart, baseTimeMsc + 20000);
+         ProcessRenkoTick(src[i].low,  src[i].time + 40, volPart, baseTimeMsc + 40000);
       }
-      ProcessRenkoTick(src[i].close, src[i].time, volPart, baseTimeMsc + 2);
+      ProcessRenkoTick(src[i].close, src[i].time + 59, volPart, baseTimeMsc + 59000);
    }
 
    m_isReplayingHistory = false;
@@ -1722,6 +1905,91 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
       SeedFromFirstPrice(ticks[seedIdx].bid, ticks[seedIdx].time);
    }
 
+   if(UseWorkerSession())
+   {
+      if(EnsureWorkerSession())
+      {
+         double prices[];
+         long times[];
+         ArrayResize(prices, total);
+         ArrayResize(times, total);
+         
+         int validCount = 0;
+         datetime lastTickTimeTmp = 0;
+         for(int i = 0; i < total; i++)
+         {
+            if(ticks[i].bid <= 0.0)
+               continue;
+            if(skipCommitted && ticks[i].time <= m_lastCommittedTime)
+               continue;
+
+            if(lastTickTimeTmp > 0 && ticks[i].time - lastTickTimeTmp > 14400)
+            {
+               datetime snapped = ticks[i].time - (ticks[i].time % 60);
+               if(snapped > m_lastCommittedTime)
+                  m_lastCommittedTime = snapped - 60;
+            }
+            lastTickTimeTmp = ticks[i].time;
+
+            long tickMsc = (ticks[i].time_msc > 0) ? ticks[i].time_msc : ((long)ticks[i].time * 1000);
+            if(tickMsc <= 0)
+               tickMsc = (long)TimeCurrent() * 1000;
+
+            prices[validCount] = ticks[i].bid;
+            times[validCount] = tickMsc;
+            validCount++;
+         }
+         
+         if(validCount > 0)
+         {
+            ArrayResize(prices, validCount);
+            ArrayResize(times, validCount);
+            long lastFedTimeMsc = times[validCount - 1];
+            if(MBP_RenkoFeedTicksW(m_workerSessionKey, m_customSymbol, prices, times, validCount) > 0)
+            {
+               // MBP_RenkoFeedTicksW is asynchronous: poll until the DLL worker thread
+               // has consumed all queued ticks (lastTickMsc reaches lastFedTimeMsc).
+               long histInfo[];
+               ArrayResize(histInfo, 4);
+               ulong pollStart = GetTickCount();
+               const ulong pollTimeoutMs = 30000;
+               while((GetTickCount() - pollStart) < pollTimeoutMs)
+               {
+                  if(MBP_RenkoGetHistoryInfoW(m_workerSessionKey, m_customSymbol, histInfo) > 0)
+                  {
+                     if(histInfo[3] >= lastFedTimeMsc)
+                        break;
+                  }
+                  Sleep(5);
+               }
+               int totalDrainedT = 0;
+               int drainBatchT;
+               while((drainBatchT = DrainWorkerClosedBars()) > 0)
+                  totalDrainedT += drainBatchT;
+               PullWorkerSnapshot();
+
+               if(totalDrainedT == 0)
+               {
+                  Print("[Renko] DLL tick history produced 0 bricks for ", m_customSymbol,
+                        ". Falling back to MQL5 loop.");
+                  DisableWorkerSession("DLL tick history produced 0 bricks");
+                  // fall through to MQL5 loop below
+               }
+               else
+               {
+                  m_isReplayingHistory = false;
+                  return true;
+               }
+            }
+            else
+            {
+               Print("[Renko] WARNING: DLL bulk ticks feed failed. Falling back to MQL5 loop.");
+               DisableWorkerSession("bulk tick feed failed");
+            }
+         }
+      }
+   }
+
    datetime lastTickTime = 0;
    for(int i = 0; i < total; i++)
    {
@@ -1748,16 +2016,33 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
 bool CRenkoEngine::ConnectHistoryToLive()
 {
    m_lastPublishedLiveBarTime = 0;
+   datetime replayFrom = (m_lastCommittedTime > 0) ? MathMax((datetime)0, m_lastCommittedTime - 7200) : (TimeCurrent() - 172800);
+
    if(m_lastCommittedTime > 0)
    {
+      MqlRates seedRates[];
+      int copied = CopyRates(m_customSymbol, PERIOD_M1, 0, 5000, seedRates);
+      int seedIndex = -1;
+      for(int i = 1; i < copied; i++)
+      {
+         if(seedRates[i].time < replayFrom)
+            seedIndex = i;
+      }
+
+      if(seedIndex >= 1)
+      {
+         ReconstructStateFromRatePair(seedRates[seedIndex - 1], seedRates[seedIndex]);
+         Print("[Renko] Incremental seed retained at ", m_lastCommittedTime,
+               "; rebuilding overlap from ", replayFrom);
+      }
+
       CustomRatesDelete(m_customSymbol, m_lastCommittedTime + 1, LONG_MAX);
       CustomTicksDelete(m_customSymbol, ((long)m_lastCommittedTime + 1) * 1000, LONG_MAX);
    }
 
-   datetime lookback = (m_lastCommittedTime > 0) ? m_lastCommittedTime : (TimeCurrent() - 172800);
    bool replayOk = (m_histDataType == DATA_M1)
-                   ? ReplayRatesFrom(lookback, true)
-                   : ReplayTicksFrom(lookback, true);
+                   ? ReplayRatesFrom(replayFrom, true)
+                   : ReplayTicksFrom(replayFrom, true);
 
    if(!replayOk)
       return false;
@@ -1822,10 +2107,7 @@ void CRenkoEngine::PrimeLiveStateFromHistory()
 
 bool CRenkoEngine::UseWorkerSession() const
 {
-   // Exact live-mode parity with renko_small / renko_large is maintained in
-   // the native engine so the visible live bars behave identically regardless
-   // of the selected backend (DLL / Python / native MQL).
-   return false;
+   return m_workerSessionEnabled && !m_workerSessionDisabled;
 }
 
 bool CRenkoEngine::WorkerSessionNeedsReseed() const
@@ -1833,7 +2115,20 @@ bool CRenkoEngine::WorkerSessionNeedsReseed() const
    double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
    if(point <= 0.0)
       point = _Point;
-   return (m_workerSeedBlockSize <= 0.0 || MathAbs(m_workerSeedBlockSize - m_currentBlockSizePoint) > (point / 2.0));
+
+   if(m_workerSeedBlockSize <= 0.0)
+      return true;
+
+   if(MathAbs(m_workerSeedBlockSize - m_currentBlockSizePoint) <= (point / 2.0))
+      return false;
+
+   // Block size changed — for Classic Renko the DLL resets its window on every
+   // reseed call, so rate-limit to at most once every 30 seconds to prevent the
+   // open/close visual loop while still reacting to genuine ATR block-size changes.
+   if(m_renkoFamily == MBP_RENKO_CLASSIC)
+      return (m_workerLastReseedMs == 0 || (GetTickCount() - m_workerLastReseedMs) >= 30000);
+
+   return true;
 }
 
 void CRenkoEngine::BumpLivePreviewGeneration()
@@ -1889,6 +2184,7 @@ bool CRenkoEngine::EnsureWorkerSession()
          return false;
       }
       m_workerSeedBlockSize = m_currentBlockSizePoint;
+      m_workerLastReseedMs = GetTickCount();
       m_workerSessionEnabled = true;
       m_workerStallCount = 0;
    }
@@ -1903,6 +2199,7 @@ void CRenkoEngine::CloseWorkerSession()
    m_workerSessionReady = false;
    m_workerSessionEnabled = false;
    m_workerSeedBlockSize = 0.0;
+   m_workerLastReseedMs = 0;
    m_workerLastSnapshotTickMsc = 0;
    m_workerStallCount = 0;
 }
@@ -1973,7 +2270,9 @@ int CRenkoEngine::DrainWorkerClosedBars()
    for(int i = 0; i < count; i++)
    {
       datetime startTime = (datetime)closedLongs[i * 3 + 0];
-      if(m_lastCommittedTime > 0)
+      // Use the actual tick-based timestamp emitted by the engine; only
+      // synthesise +1 when needed to enforce monotonicity.
+      if(m_lastCommittedTime > 0 && startTime <= m_lastCommittedTime)
          startTime = m_lastCommittedTime + 1;
 
       int idx = ArraySize(m_ramRateBuffer);
@@ -1982,6 +2281,17 @@ int CRenkoEngine::DrainWorkerClosedBars()
       double rawHigh = NormalizePrice(closedDoubles[i * 4 + 1]);
       double rawLow = NormalizePrice(closedDoubles[i * 4 + 2]);
       double brickClose = NormalizePrice(closedDoubles[i * 4 + 3]);
+
+      // A Renko brick must always have a body. Zero-body bars indicate a DLL
+      // precision fault — skip them to prevent horizontal-line artefacts on the chart.
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      if(point <= 0.0) point = _Point;
+      if(MathAbs(brickClose - brickOpen) < point * 0.5)
+      {
+         m_lastCommittedTime = startTime;
+         continue;
+      }
+
       double bodyHigh = MathMax(brickOpen, brickClose);
       double bodyLow = MathMin(brickOpen, brickClose);
       double brickHigh = bodyHigh;
@@ -1991,6 +2301,9 @@ int CRenkoEngine::DrainWorkerClosedBars()
          brickHigh = MathMax(rawHigh, bodyHigh);
          brickLow = MathMin(rawLow, bodyLow);
       }
+      // Enforce MT5 OHLC validity: high must cover body, low must undercut body
+      brickHigh = MathMax(brickHigh, bodyHigh);
+      brickLow  = MathMin(brickLow,  bodyLow);
       m_ramRateBuffer[idx].time = startTime;
       m_ramRateBuffer[idx].open = brickOpen;
       m_ramRateBuffer[idx].high = brickHigh;
@@ -2138,6 +2451,7 @@ void CRenkoEngine::SaveState()
    GlobalVariableSet(m_gvPrefix + "_Anchor", m_anchorPrice);
    GlobalVariableSet(m_gvPrefix + "_Trend", (double)m_isTrendUp);
    GlobalVariableSet(m_gvPrefix + "_LastTime", (double)m_lastCommittedTime);
+   GlobalVariableSet(m_gvPrefix + "_LastCloseTime", (double)m_lastCommittedCloseTime);
    GlobalVariableSet(m_gvPrefix + "_High", m_boxHigh);
    GlobalVariableSet(m_gvPrefix + "_Low", m_boxLow);
    GlobalVariableSet(m_gvPrefix + "_LastClose", m_lastClosePrice);
@@ -2156,6 +2470,9 @@ bool CRenkoEngine::LoadState()
    m_isTrendUp = (bool)GlobalVariableGet(m_gvPrefix + "_Trend");
    m_lastCommittedTime = (datetime)GlobalVariableGet(m_gvPrefix + "_LastTime");
    m_hardCommittedTime = m_lastCommittedTime;
+   m_lastCommittedCloseTime = GlobalVariableCheck(m_gvPrefix + "_LastCloseTime")
+                              ? (datetime)GlobalVariableGet(m_gvPrefix + "_LastCloseTime")
+                              : m_lastCommittedTime; // Fallback for sessions saved before this field existed
    m_boxHigh = GlobalVariableGet(m_gvPrefix + "_High");
    m_boxLow = GlobalVariableGet(m_gvPrefix + "_Low");
    m_lastClosePrice = GlobalVariableGet(m_gvPrefix + "_LastClose");
@@ -2204,5 +2521,32 @@ long CRenkoEngine::FindChartBySymbol(string sym)
    }
    return 0;
 }
+
+bool CRenkoEngine::ReconstructStateFromCustomSymbol()
+{
+   MqlRates rates[];
+   if(CopyRates(m_customSymbol, PERIOD_M1, 0, 2, rates) < 2)
+      return false;
+
+   // Element with index 1 is newer than index 0 in MT5 CopyRates
+   ReconstructStateFromRatePair(rates[0], rates[1]);
+   return true;
+}
+
+void CRenkoEngine::ReconstructStateFromRatePair(const MqlRates &prev, const MqlRates &last)
+{
+   m_lastClosePrice = last.close;
+   m_anchorPrice = last.close;
+   m_lastCommittedTime = last.time;
+   
+   // Reconstruct trend: if newest close > previous close, trend is UP.
+   if(last.close > prev.close) m_isTrendUp = true;
+   else if(last.close < prev.close) m_isTrendUp = false;
+   else m_isTrendUp = (last.close >= last.open);
+
+   m_lockedBlockSize = 0; 
+   m_liveCandidateActive = false;
+}
+
 
 #endif // __MULTIBOTPRO_RENKO_MQH__

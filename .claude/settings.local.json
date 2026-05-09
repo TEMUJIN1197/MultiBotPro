@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\slimb\\\\AppData\\\\Roaming\\\\MetaQuotes\\\\Terminal\\\\D0E8209F77C8CF37AD8BF550E51FF075\\\\MQL5\\\\Experts\\\\MultiBotPro\" -Recurse -Force)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(find \"C:\\\\Users\\\\slimb\\\\AppData\\\\Roaming\\\\MetaQuotes\\\\Terminal\\\\D0E8209F77C8CF37AD8BF550E51FF075\\\\MQL5\" -iname \"*renko*\" 2>/dev/null)",
+      "PowerShell(Get-ChildItem \"C:\\\\Program Files\\\\MetaTrader 5\\\\metaeditor64.exe\" -ErrorAction SilentlyContinue; Get-ChildItem \"C:\\\\Program Files \\(x86\\)\\\\MetaTrader 5\\\\metaeditor64.exe\" -ErrorAction SilentlyContinue; Get-ChildItem \"$env:LOCALAPPDATA\\\\Programs\\\\MetaTrader 5\\\\metaeditor64.exe\" -ErrorAction SilentlyContinue)",
+      "PowerShell(& \"C:\\\\Program Files\\\\MetaTrader 5\\\\MetaEditor64.exe\" /compile:\"C:\\\\Users\\\\slimb\\\\AppData\\\\Roaming\\\\MetaQuotes\\\\Terminal\\\\D0E8209F77C8CF37AD8BF550E51FF075\\\\MQL5\\\\Experts\\\\MultiBotPro\\\\MultiBotPro.mq5\" /log:\"C:\\\\Users\\\\slimb\\\\AppData\\\\Roaming\\\\MetaQuotes\\\\Terminal\\\\D0E8209F77C8CF37AD8BF550E51FF075\\\\MQL5\\\\Experts\\\\MultiBotPro\\\\compile_log.txt\" /inc:\"C:\\\\Users\\\\slimb\\\\AppData\\\\Roaming\\\\MetaQuotes\\\\Terminal\\\\D0E8209F77C8CF37AD8BF550E51FF075\\\\MQL5\")"
+    ]
+  }
+}

@@ -2,13 +2,21 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Get-Location).Path
 $Mql5Root = (Resolve-Path (Join-Path $ProjectRoot "..\..")).Path
-$StageRoot = Join-Path $ProjectRoot "S"
+$StageRoot = Join-Path $ProjectRoot "PackageStage"
 $StageExpertsRoot = Join-Path $StageRoot "E"
 $StageLibrariesRoot = Join-Path $StageRoot "L"
 $StagePresetsRoot = Join-Path $StageRoot "P"
 $StageTemplatesRoot = Join-Path $StageRoot "T"
 $OutputRoot = Join-Path $ProjectRoot "Output"
 $InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+# Fall back to user-level install location
+if (-not (Test-Path $InnoCompiler)) {
+    $InnoCompiler = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+}
+# $SystemPythonRoot was used by Stage-TrimmedPythonRuntime to fall back to a system
+# Python install when the workspace WinPython payload was empty. Both are now
+# dead code — ShadowMaster.exe is a self-contained PyInstaller binary so no
+# WinPython is staged any more. Kept here for reference only.
 $SystemPythonRoot = "C:\Program Files\Python312"
 
 function New-CleanDirectory {
@@ -161,8 +169,12 @@ $requiredWorkspaceFiles = @(
     "runtime_v3.json",
     "sqlite_schema.sql",
     "PythonApp\ShadowMaster.exe",
-    "PythonApp\renko_fallback.exe",
-    "PythonApp\init_database.exe",
+    # init_database.exe removed: EA's V3_EnsureRuntimeSchema() (hedgeBridge.mqh:359)
+    # creates every table/index/PRAGMA on first launch, making the standalone .exe
+    # redundant. Schema source of truth is sqlite_schema.sql plus the EA's runtime
+    # CREATE TABLE IF NOT EXISTS statements.
+    # renko_fallback.exe removed: never invoked from MQL5 code. Renko goes through
+    # accel.dll (MBP_RenkoOpenSessionW etc.) or MultiBotPro_Renko.mqh natively.
     "PythonApp\README.txt"
 )
 
@@ -195,15 +207,23 @@ Copy-RequiredFile -Source (Join-Path $ProjectRoot "accel.dll") -DestinationDirec
 
 $workspacePythonRoot = Join-Path $ProjectRoot "PythonApp"
 $stagedPythonRoot = Join-Path $StageExpertsRoot "PythonApp"
-Copy-TreeContent -Source $workspacePythonRoot -Destination $stagedPythonRoot
 
-$workspaceWinPython = Join-Path $workspacePythonRoot "WinPython"
-$stagedWinPython = Join-Path $stagedPythonRoot "WinPython"
-$workspaceWinPythonHasFiles = (Test-Path $workspaceWinPython) -and ((Get-ChildItem -LiteralPath $workspaceWinPython -Force -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)
-
-if (-not $workspaceWinPythonHasFiles) {
-    Write-Host ">>> Workspace WinPython payload is empty. Staging trimmed runtime from $SystemPythonRoot" -ForegroundColor Yellow
-    Stage-TrimmedPythonRuntime -SourceRoot $SystemPythonRoot -DestinationRoot $stagedWinPython
+# WinPython is intentionally EXCLUDED from the staged payload. ShadowMaster.exe
+# is now built as a self-contained PyInstaller binary that bundles its own Python
+# interpreter and dependencies, so shipping a separate WinPython runtime would
+# add ~89 MB of dead weight to the installer for no functional benefit.
+# Copy everything in PythonApp EXCEPT the WinPython subdirectory.
+if (Test-Path $workspacePythonRoot) {
+    if (-not (Test-Path $stagedPythonRoot)) {
+        New-Item -ItemType Directory -Path $stagedPythonRoot | Out-Null
+    }
+    Get-ChildItem -LiteralPath $workspacePythonRoot -Force | Where-Object {
+        $_.Name -ne "WinPython" -and
+        $_.Name -notlike "*.bak*" -and
+        $_.Extension -notin @(".py", ".pyw", ".spec")
+    } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $stagedPythonRoot -Recurse -Force
+    }
 }
 
 $presetPath = Join-Path $Mql5Root "Presets\multibot.set"

@@ -5,27 +5,25 @@
 //|                     Ported from HeikenAshiRenko_Builder_v4      |
 //+------------------------------------------------------------------+
 #include "MultiBotPro_Defines.mqh"
+#include "MultiBotPro_CustomSymbolPublisher.mqh"
 
-class CHeikenRenkoEngine
+class CHeikenRenkoEngine : public CCustomSymbolPublisher
 {
 private:
    string   m_symbol;
-   string   m_customSymbol;
    double   m_boxSize;
    double   m_anchorPrice;
    bool     m_isTrendUp;
    datetime m_lastSyntheticTime;
+   bool     m_isBuildingHistory;
+   MqlRates m_historyBuffer[];
+   datetime m_liveBarStartTime;
 
    double   m_prevHAOpen;
    double   m_prevHAClose;
 
    long     m_chartID;
    datetime m_lastVisualUpdate;
-   long     m_lastLiveTickMsc;
-   bool     m_tickMirroringEnabled;
-   bool     m_tickMirrorWarningLogged;
-   int      m_tickMirrorFailureCount;
-   ulong    m_tickMirrorRetryAfterMs;
 
    datetime m_liveBarTime;
    double   m_liveOpen;
@@ -36,15 +34,18 @@ private:
    double   m_lastSourceBid;
    double   m_lastSourceAsk;
 
+   bool     m_dllDisabled;
+   string   m_dllSessionKey;
+
 public:
    CHeikenRenkoEngine() : m_boxSize(0), m_anchorPrice(0), m_isTrendUp(true),
-                          m_lastSyntheticTime(0), m_prevHAOpen(0),
+                          m_lastSyntheticTime(0), m_isBuildingHistory(false),
+                          m_liveBarStartTime(0), m_prevHAOpen(0),
                           m_prevHAClose(0), m_chartID(0), m_lastVisualUpdate(0),
-                          m_lastLiveTickMsc(0), m_tickMirroringEnabled(true),
-                          m_tickMirrorWarningLogged(false), m_tickMirrorFailureCount(0),
-                          m_tickMirrorRetryAfterMs(0), m_liveBarTime(0),
+                          m_liveBarTime(0),
                           m_liveOpen(0), m_liveHigh(0), m_liveLow(0), m_liveClose(0),
-                          m_lastLivePrice(0), m_lastSourceBid(0), m_lastSourceAsk(0) {}
+                          m_lastLivePrice(0), m_lastSourceBid(0), m_lastSourceAsk(0),
+                          m_dllDisabled(false), m_dllSessionKey("") {}
 
    void Init(string symbol, string customSymbol, double boxSize)
    {
@@ -54,6 +55,9 @@ public:
       m_anchorPrice = 0;
       m_isTrendUp = true;
       m_lastSyntheticTime = 0;
+      m_isBuildingHistory = false;
+      m_liveBarStartTime = 0;
+      ArrayFree(m_historyBuffer);
       m_prevHAOpen = 0;
       m_prevHAClose = 0;
       m_chartID = FindChartBySymbol(m_customSymbol);
@@ -71,6 +75,8 @@ public:
       m_lastLivePrice = 0;
       m_lastSourceBid = 0;
       m_lastSourceAsk = 0;
+      m_dllDisabled = false;
+      m_dllSessionKey = customSymbol;
 
       string gvPrefix = m_customSymbol + "_HA_";
       if(GlobalVariableCheck(gvPrefix + "Anchor"))
@@ -103,25 +109,43 @@ public:
    bool BuildHistory(int daysBack)
    {
       Print("Heiken Renko Build: ", m_symbol, " -> ", m_customSymbol);
-      CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
 
-      datetime start = TimeCurrent() - (daysBack * 86400);
+      datetime fullStart = TimeCurrent() - (daysBack * 86400);
+      datetime start = fullStart;
+      datetime skipBefore = 0;
+      bool incremental = (Bars(m_customSymbol, PERIOD_M1) > 10 && m_lastSyntheticTime > 0);
+      if(incremental)
+      {
+         skipBefore = m_lastSyntheticTime;
+         start = MathMax(fullStart, skipBefore - 7200);
+         CustomRatesDelete(m_customSymbol, skipBefore + 1, LONG_MAX);
+         CustomTicksDelete(m_customSymbol, ((long)skipBefore + 1) * 1000, LONG_MAX);
+         Print("[HeikenRenko] Incremental build for ", m_customSymbol,
+               ": replaying from ", start, " after retained brick ", skipBefore);
+      }
+      else
+      {
+         CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
+         CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
+      }
+
       MqlRates src[];
       int total = CopyRates(m_symbol, PERIOD_M1, start, TimeCurrent(), src);
       if(total <= 0)
          return false;
 
-      m_anchorPrice = src[0].open;
-      m_isTrendUp = true;
-      m_prevHAOpen = 0;
-      m_prevHAClose = 0;
-      m_lastSyntheticTime = TimeCurrent() - (total * 60);
-      m_lastLiveTickMsc = 0;
-      m_tickMirroringEnabled = true;
-      m_tickMirrorWarningLogged = false;
-      m_tickMirrorFailureCount = 0;
-      m_tickMirrorRetryAfterMs = 0;
+      if(!incremental)
+      {
+         m_anchorPrice = src[0].open;
+         m_isTrendUp = true;
+         m_prevHAOpen = 0;
+         m_prevHAClose = 0;
+         m_lastSyntheticTime = 0;
+      }
+      m_isBuildingHistory = true;
+      m_liveBarStartTime = 0;
+      ArrayFree(m_historyBuffer);
+      ResetPublisherState();
       m_liveBarTime = 0;
       m_liveOpen = 0;
       m_liveHigh = 0;
@@ -131,24 +155,49 @@ public:
       m_lastSourceBid = src[total - 1].close;
       m_lastSourceAsk = src[total - 1].close;
 
+      // --- DLL-accelerated path ---
+      if(!incremental && !m_dllDisabled && TryDllBuild(src, total))
+      {
+         m_isBuildingHistory = false;
+         double lastPrice = src[total - 1].close;
+         datetime lastTime = src[total - 1].time;
+         UpdateLiveBrick(lastPrice, lastTime, (long)lastTime * 1000, lastPrice, lastPrice, false);
+         SaveState();
+         return true;
+      }
+
+      // --- MQL5 fallback ---
       for(int i = 0; i < total; i++)
       {
+         if(incremental && src[i].time + 59 <= skipBefore)
+            continue;
+
          long baseTimeMsc = (long)src[i].time * 1000;
+
+         // Spread OHLC sub-ticks at 0, 20, 40, 59 seconds within the M1 window.
+         // This gives each completing brick the timestamp of the sub-tick that closed it
+         // (last-tick semantics) and matches the DLL path exactly.
+         ProcessPrice(src[i].open, src[i].time,      baseTimeMsc,          src[i].close, src[i].close, false);
          if(src[i].close >= src[i].open)
          {
-            ProcessPrice(src[i].open,  src[i].time, baseTimeMsc,     src[i].close, src[i].close, false);
-            ProcessPrice(src[i].low,   src[i].time, baseTimeMsc + 1, src[i].close, src[i].close, false);
-            ProcessPrice(src[i].high,  src[i].time, baseTimeMsc + 2, src[i].close, src[i].close, false);
-            ProcessPrice(src[i].close, src[i].time, baseTimeMsc + 3, src[i].close, src[i].close, false);
+            ProcessPrice(src[i].low,  src[i].time + 20, baseTimeMsc + 20000,  src[i].close, src[i].close, false);
+            ProcessPrice(src[i].high, src[i].time + 40, baseTimeMsc + 40000,  src[i].close, src[i].close, false);
          }
          else
          {
-            ProcessPrice(src[i].open,  src[i].time, baseTimeMsc,     src[i].close, src[i].close, false);
-            ProcessPrice(src[i].high,  src[i].time, baseTimeMsc + 1, src[i].close, src[i].close, false);
-            ProcessPrice(src[i].low,   src[i].time, baseTimeMsc + 2, src[i].close, src[i].close, false);
-            ProcessPrice(src[i].close, src[i].time, baseTimeMsc + 3, src[i].close, src[i].close, false);
+            ProcessPrice(src[i].high, src[i].time + 20, baseTimeMsc + 20000,  src[i].close, src[i].close, false);
+            ProcessPrice(src[i].low,  src[i].time + 40, baseTimeMsc + 40000,  src[i].close, src[i].close, false);
          }
+         ProcessPrice(src[i].close, src[i].time + 59, baseTimeMsc + 59000,  src[i].close, src[i].close, false);
+         // m_lastSyntheticTime is updated inside ProcessPrice for each committed brick,
+         // so no outer time-override loop is required.
       }
+
+      if(ArraySize(m_historyBuffer) > 0)
+         CustomRatesUpdate(m_customSymbol, m_historyBuffer, ArraySize(m_historyBuffer));
+
+      m_isBuildingHistory = false;
+      ArrayFree(m_historyBuffer);
 
       double lastPrice = src[total - 1].close;
       datetime lastTime = src[total - 1].time;
@@ -240,6 +289,9 @@ private:
       if(m_anchorPrice == 0)
          m_anchorPrice = price;
 
+      if(m_liveBarStartTime <= 0)
+         m_liveBarStartTime = (datetime)MathMax((long)m_lastSyntheticTime + 1, (long)tickTime);
+
       bool newBrick = false;
       while(true)
       {
@@ -297,8 +349,19 @@ private:
          if(!emitted)
             break;
 
-         PushHeikenAshiBar(rOpen, rHigh, rLow, rClose);
+         // Bar time = the completing tick's timestamp (last-tick semantics).
+         // MathMax enforces monotonicity; m_lastSyntheticTime is always updated
+         // so that subsequent bricks in the same while() iteration get +1 offsets.
+         datetime completionTime = (datetime)MathMax((long)m_lastSyntheticTime + 1, (long)tickTime);
+
+         if(!m_isBuildingHistory && m_liveBarStartTime > 0 && m_liveBarStartTime != completionTime)
+            CustomRatesDelete(m_customSymbol, m_liveBarStartTime, m_liveBarStartTime);
+
+         PushHeikenAshiBar(rOpen, rHigh, rLow, rClose, completionTime);
+         m_lastSyntheticTime = completionTime; // always update to preserve monotonicity
+
          newBrick = true;
+         m_liveBarStartTime = 0;
       }
 
       if(publishLive)
@@ -310,28 +373,190 @@ private:
       return newBrick;
    }
 
-   void PushHeikenAshiBar(double rOpen, double rHigh, double rLow, double rClose)
+   void PushHeikenAshiBar(double rOpen, double rHigh, double rLow, double rClose, datetime barTime)
    {
       double haClose = (rOpen + rHigh + rLow + rClose) / 4.0;
       double haOpen = (m_prevHAOpen == 0 && m_prevHAClose == 0) ? ((rOpen + rClose) / 2.0) : ((m_prevHAOpen + m_prevHAClose) / 2.0);
       double haHigh = MathMax(rHigh, MathMax(haOpen, haClose));
       double haLow = MathMin(rLow, MathMin(haOpen, haClose));
+      // Guarantee MT5 OHLC validity
+      haHigh = MathMax(haHigh, MathMax(haOpen, haClose));
+      haLow  = MathMin(haLow,  MathMin(haOpen, haClose));
 
       m_prevHAOpen = haOpen;
       m_prevHAClose = haClose;
-      m_lastSyntheticTime += 60;
 
-      MqlRates rate[1];
-      rate[0].time = m_lastSyntheticTime;
-      rate[0].open = haOpen;
-      rate[0].high = haHigh;
-      rate[0].low = haLow;
-      rate[0].close = haClose;
-      rate[0].tick_volume = 1;
-      rate[0].spread = 0;
-      rate[0].real_volume = 0;
+      MqlRates rate;
+      rate.time = barTime;
+      rate.open = haOpen;
+      rate.high = haHigh;
+      rate.low = haLow;
+      rate.close = haClose;
+      rate.tick_volume = 1;
+      rate.spread = 0;
+      rate.real_volume = 0;
 
-      CustomRatesUpdate(m_customSymbol, rate, 1);
+      if(m_isBuildingHistory)
+      {
+         int size = ArraySize(m_historyBuffer);
+         ArrayResize(m_historyBuffer, size + 1, 10000);
+         m_historyBuffer[size] = rate;
+      }
+      else
+      {
+         MqlRates updateRate[1];
+         updateRate[0] = rate;
+         CustomRatesUpdate(m_customSymbol, updateRate, 1);
+      }
+   }
+
+   // DLL-accelerated history build: uses the Renko DLL (CLASSIC family) to generate
+   // Renko bricks in a background thread, then applies the Heiken Ashi formula on each
+   // brick. Falls back to the MQL5 loop if the DLL is unavailable or returns 0 bars.
+   bool TryDllBuild(const MqlRates &src[], int total)
+   {
+      if(MBP_QueryRenkoBackendW("", "session") <= 0)
+      {
+         m_dllDisabled = true;
+         return false;
+      }
+
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      if(point <= 0.0) point = _Point;
+      int digits = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+
+      if(MBP_RenkoOpenSessionW(m_dllSessionKey, m_customSymbol,
+                               (int)MBP_RENKO_CLASSIC, point, digits) <= 0)
+      {
+         m_dllDisabled = true;
+         return false;
+      }
+
+      if(MBP_RenkoSeedSessionW(m_dllSessionKey, m_customSymbol,
+                               m_anchorPrice, m_isTrendUp ? 1 : 0, m_boxSize,
+                               0.0, 0.5, 2.0, 0, 0, 0) <= 0)
+      {
+         MBP_RenkoCloseSessionW(m_dllSessionKey, m_customSymbol);
+         m_dllDisabled = true;
+         return false;
+      }
+
+      // Build the price/time arrays using the same 0/20/40/59-second sub-tick
+      // spread used by CRenkoEngine so timestamps are consistent across all types.
+      int bufferSize = total * 4;
+      double prices[];
+      long   times[];
+      ArrayResize(prices, bufferSize);
+      ArrayResize(times,  bufferSize);
+
+      int validCount = 0;
+      for(int i = 0; i < total; i++)
+      {
+         long baseTimeMsc = (long)src[i].time * 1000;
+         prices[validCount] = src[i].open;  times[validCount] = baseTimeMsc;          validCount++;
+         if(src[i].close >= src[i].open)
+         {
+            prices[validCount] = src[i].low;  times[validCount] = baseTimeMsc + 20000; validCount++;
+            prices[validCount] = src[i].high; times[validCount] = baseTimeMsc + 40000; validCount++;
+         }
+         else
+         {
+            prices[validCount] = src[i].high; times[validCount] = baseTimeMsc + 20000; validCount++;
+            prices[validCount] = src[i].low;  times[validCount] = baseTimeMsc + 40000; validCount++;
+         }
+         prices[validCount] = src[i].close; times[validCount] = baseTimeMsc + 59000; validCount++;
+      }
+
+      ArrayResize(prices, validCount);
+      ArrayResize(times,  validCount);
+      long lastFedTimeMsc = times[validCount - 1];
+
+      if(MBP_RenkoFeedRatesW(m_dllSessionKey, m_customSymbol, prices, times, validCount) <= 0)
+      {
+         MBP_RenkoCloseSessionW(m_dllSessionKey, m_customSymbol);
+         m_dllDisabled = true;
+         return false;
+      }
+
+      // Poll until the DLL worker thread has processed all fed data.
+      long histInfo[];
+      ArrayResize(histInfo, 4);
+      ulong pollStart = GetTickCount();
+      const ulong pollTimeoutMs = 30000;
+      while((GetTickCount() - pollStart) < pollTimeoutMs)
+      {
+         if(MBP_RenkoGetHistoryInfoW(m_dllSessionKey, m_customSymbol, histInfo) > 0)
+         {
+            if(histInfo[3] >= lastFedTimeMsc)
+               break;
+         }
+         Sleep(5);
+      }
+
+      // Drain raw Renko bricks and apply the Heiken Ashi formula.
+      int totalDrained = 0;
+      while(true)
+      {
+         double closedDoubles[];
+         long   closedLongs[];
+         ArrayResize(closedDoubles, 64 * 4);
+         ArrayResize(closedLongs,   64 * 3);
+         int count = MBP_RenkoReadClosedBarsW(m_dllSessionKey, m_customSymbol,
+                                              closedDoubles, closedLongs, 64);
+         if(count <= 0)
+            break;
+
+         for(int i = 0; i < count; i++)
+         {
+            datetime barTime = (datetime)closedLongs[i * 3 + 0];
+            if(m_lastSyntheticTime > 0 && barTime <= m_lastSyntheticTime)
+               barTime = m_lastSyntheticTime + 1;
+
+            double rOpen  = closedDoubles[i * 4 + 0];
+            double rHigh  = closedDoubles[i * 4 + 1];
+            double rLow   = closedDoubles[i * 4 + 2];
+            double rClose = closedDoubles[i * 4 + 3];
+
+            // Guard against zero-body bricks from DLL precision faults.
+            if(MathAbs(rClose - rOpen) < point * 0.5)
+            {
+               m_lastSyntheticTime = barTime;
+               continue;
+            }
+
+            // Enforce OHLC validity on the raw Renko brick before HA transform.
+            double bodyHigh = MathMax(rOpen, rClose);
+            double bodyLow  = MathMin(rOpen, rClose);
+            rHigh = MathMax(rHigh, bodyHigh);
+            rLow  = MathMin(rLow,  bodyLow);
+
+            PushHeikenAshiBar(rOpen, rHigh, rLow, rClose, barTime);
+            m_lastSyntheticTime = barTime;
+            totalDrained++;
+         }
+      }
+
+      MBP_RenkoCloseSessionW(m_dllSessionKey, m_customSymbol);
+
+      if(totalDrained == 0)
+      {
+         Print("[HeikenRenko] DLL produced 0 bricks for ", m_customSymbol, ". Falling back to MQL5 loop.");
+         ArrayFree(m_historyBuffer);
+         m_prevHAOpen = 0;
+         m_prevHAClose = 0;
+         m_lastSyntheticTime = 0;
+         m_anchorPrice = src[0].open;
+         m_isTrendUp = true;
+         m_dllDisabled = true;
+         return false;
+      }
+
+      if(ArraySize(m_historyBuffer) > 0)
+         CustomRatesUpdate(m_customSymbol, m_historyBuffer, ArraySize(m_historyBuffer));
+
+      ArrayFree(m_historyBuffer);
+      Print("[HeikenRenko] DLL built ", totalDrained, " HA-Renko bricks for ", m_customSymbol);
+      return true;
    }
 
    void UpdateLiveBrick(double currentPrice, datetime tickTime, long tickTimeMsc, double sourceBid, double sourceAsk, bool allowMirrorDegrade = true)
@@ -345,8 +570,12 @@ private:
       double haOpen = (m_prevHAOpen == 0 && m_prevHAClose == 0) ? ((rOpen + rClose) / 2.0) : ((m_prevHAOpen + m_prevHAClose) / 2.0);
       double haHigh = MathMax(rHigh, MathMax(haOpen, haClose));
       double haLow = MathMin(rLow, MathMin(haOpen, haClose));
+      haHigh = MathMax(haHigh, MathMax(haOpen, haClose));
+      haLow  = MathMin(haLow,  MathMin(haOpen, haClose));
 
-      m_liveBarTime = (m_lastSyntheticTime > 0) ? (m_lastSyntheticTime + 60) : tickTime;
+      m_liveBarTime = m_liveBarStartTime;
+      if(m_liveBarTime <= 0) m_liveBarTime = (datetime)MathMax((long)m_lastSyntheticTime + 1, (long)tickTime);
+
       m_liveOpen = haOpen;
       m_liveHigh = haHigh;
       m_liveLow = haLow;
@@ -372,11 +601,8 @@ private:
       rate[0].real_volume = 0;
 
       ResetLastError();
-      if(!CustomRatesUpdate(m_customSymbol, rate, 1))
-      {
-         Print("[HeikenRenko] WARNING: Live rate update failed for ", m_customSymbol, " (Err: ", _LastError, ")");
+      if(!SafeCustomRatesUpdate(rate, 1))
          return;
-      }
 
       double sourceBid = (m_lastSourceBid > 0) ? m_lastSourceBid : m_liveClose;
       double sourceAsk = (m_lastSourceAsk > sourceBid) ? m_lastSourceAsk : sourceBid;
@@ -400,50 +626,8 @@ private:
       CustomSymbolSetDouble(m_customSymbol, SYMBOL_ASK, ask);
       CustomSymbolSetDouble(m_customSymbol, SYMBOL_LAST, last);
 
-      if(!m_tickMirroringEnabled)
-      {
-         if(!allowMirrorDegrade)
-            return;
-
-         if(GetTickCount() < m_tickMirrorRetryAfterMs)
-            return;
-
-         m_tickMirroringEnabled = true;
-      }
-
       long liveTickMsc = ReserveCustomTickTimeMsc((tickTimeMsc > 0) ? tickTimeMsc : ((long)syntheticTime * 1000));
-
-      MqlTick liveTick[1];
-      ZeroMemory(liveTick);
-      liveTick[0].time = (datetime)(liveTickMsc / 1000);
-      liveTick[0].time_msc = liveTickMsc;
-      liveTick[0].bid = bid;
-      liveTick[0].ask = ask;
-      liveTick[0].last = last;
-      liveTick[0].volume = 1;
-      liveTick[0].volume_real = 0.0;
-      liveTick[0].flags = TICK_FLAG_BID | TICK_FLAG_ASK | TICK_FLAG_LAST;
-
-      ResetLastError();
-      if(!CustomTicksAdd(m_customSymbol, liveTick, 1))
-      {
-         int tickError = _LastError;
-         if(!allowMirrorDegrade)
-            return;
-
-         m_tickMirrorFailureCount++;
-         if(m_tickMirrorFailureCount >= 3)
-         {
-            m_tickMirrorRetryAfterMs = GetTickCount() + 5000;
-            DisableTickMirroring("live update", tickError);
-         }
-         return;
-      }
-
-      m_tickMirroringEnabled = true;
-      m_tickMirrorFailureCount = 0;
-      m_tickMirrorWarningLogged = false;
-      m_lastLiveTickMsc = liveTickMsc;
+      PublishLiveStateTick(syntheticTime, liveTickMsc, bid, ask, last, allowMirrorDegrade);
    }
 
    long ReserveCustomTickTimeMsc(long candidateTimeMsc)
@@ -457,17 +641,6 @@ private:
          normalizedTimeMsc = minTimeMsc;
 
       return normalizedTimeMsc;
-   }
-
-   void DisableTickMirroring(string stage, int errorCode)
-   {
-      m_tickMirroringEnabled = false;
-      if(m_tickMirrorWarningLogged)
-         return;
-
-      m_tickMirrorWarningLogged = true;
-      Print("[HeikenRenko] WARNING: Custom tick mirroring disabled for ", m_customSymbol,
-            " after ", stage, " failed (Err: ", errorCode, "). Rates-only mode will continue.");
    }
 
    void SaveState()

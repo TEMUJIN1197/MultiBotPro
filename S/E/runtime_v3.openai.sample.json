@@ -1,0 +1,31 @@
+{
+  "version": "1.1",
+  "sqlite_path": "MultiBotPro_v3.db",
+  "shadowmaster": {
+    "enabled": true,
+    "cycle_hours": 6,
+    "lookback_days": 7,
+    "max_workers": 4,
+    "transaction_cost_bps": 2.0,
+    "shadow_config_prefix": "ShadowConfig",
+    "symbols": ["AUDNZD", "CHFJPY", "EURGBP", "USDCAD"]
+  },
+  "sentiment": {
+    "rss_enabled": true,
+    "external_enabled": true,
+    "external_url_env": "SHADOW_SENTIMENT_URL",
+    "killswitch_threshold": -0.4
+  },
+  "openai": {
+    "enabled": true,
+    "model": "gpt-5.5",
+    "reasoning_effort": "low",
+    "timeout_seconds": 25,
+    "max_output_tokens": 220,
+    "api_key_env": "OPENAI_API_KEY",
+    "project_env": "OPENAI_PROJECT",
+    "organization_env": "OPENAI_ORG_ID",
+    "base_url_env": "OPENAI_BASE_URL",
+    "store": false
+  }
+}

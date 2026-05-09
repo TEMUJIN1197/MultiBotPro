@@ -367,6 +367,35 @@ bool OverlayIsDrawableValue(const double value)
    return (value != EMPTY_VALUE);
 }
 
+bool OverlayResolveTailPair(double &values[], double &previousValue, double &currentValue)
+{
+   int count = ArraySize(values);
+   previousValue = EMPTY_VALUE;
+   currentValue = EMPTY_VALUE;
+
+   if(count <= 0)
+      return false;
+
+   if(OverlayIsDrawableValue(values[0]))
+      currentValue = values[0];
+
+   for(int i = 1; i < count; i++)
+   {
+      if(OverlayIsDrawableValue(values[i]))
+      {
+         previousValue = values[i];
+         break;
+      }
+   }
+
+   if(!OverlayIsDrawableValue(currentValue) && OverlayIsDrawableValue(previousValue))
+      currentValue = previousValue;
+   if(!OverlayIsDrawableValue(previousValue) && count > 0 && OverlayIsDrawableValue(currentValue))
+      previousValue = currentValue;
+
+   return (OverlayIsDrawableValue(previousValue) && OverlayIsDrawableValue(currentValue));
+}
+
 bool OverlayCopyIndicatorValues(const int handle, const int barsToCopy, double &buffer[])
 {
    ArrayResize(buffer, barsToCopy);
@@ -411,8 +440,8 @@ void OverlayUpsertTrendSegment(const string name,
    ObjectSetInteger(chartID, name, OBJPROP_COLOR, lineColor);
    ObjectSetInteger(chartID, name, OBJPROP_STYLE, lineStyle);
    ObjectSetInteger(chartID, name, OBJPROP_WIDTH, MathMax(1, lineWidth));
-   ObjectSetInteger(chartID, name, OBJPROP_BACK, true);
-   ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 0);
+   ObjectSetInteger(chartID, name, OBJPROP_BACK, false);
+   ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 1);
    ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
    ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
@@ -764,31 +793,47 @@ void UpdateIndicatorOverlayTail()
    {
       string token = OverlaySeriesToken(i);
       string name = MBV_PREFIX + "TAIL_" + token;
+      string liveName = MBV_PREFIX + "LIVE_" + token;
 
       if(!OverlaySeriesEnabled(i))
       {
          ObjectDelete(chartID, name);
+         ObjectDelete(chartID, liveName);
          continue;
       }
 
       double values[];
-      if(!OverlayCopyIndicatorValues(G_IndicatorOverlay.maHandles[i], 2, values))
+      if(!OverlayCopyIndicatorValues(G_IndicatorOverlay.maHandles[i], 4, values))
       {
          ObjectDelete(chartID, name);
+         ObjectDelete(chartID, liveName);
          continue;
       }
 
-      if(!OverlayIsDrawableValue(values[1]) || !OverlayIsDrawableValue(values[0]))
+      double previousValue = EMPTY_VALUE;
+      double currentValue = EMPTY_VALUE;
+      if(!OverlayResolveTailPair(values, previousValue, currentValue))
       {
          ObjectDelete(chartID, name);
+         ObjectDelete(chartID, liveName);
          continue;
       }
 
       OverlayUpsertTrendSegment(name,
                                 rates[1].time,
-                                values[1],
+                                previousValue,
+                                rates[0].time,
+                                currentValue,
+                                OverlaySeriesColor(i),
+                                OverlaySeriesStyle(i),
+                                OverlaySeriesWidth(i),
+                                OverlaySeriesDescription(i));
+
+      OverlayUpsertTrendSegment(liveName,
+                                rates[0].time,
+                                currentValue,
                                 tailEndTime,
-                                values[0],
+                                currentValue,
                                 OverlaySeriesColor(i),
                                 OverlaySeriesStyle(i),
                                 OverlaySeriesWidth(i),
@@ -796,6 +841,25 @@ void UpdateIndicatorOverlayTail()
    }
 
    int chartIdx = G_IndicatorOverlay.chartSymbolIndex;
+
+   double vwap1[];
+   double vwap3[];
+   double vwapHigh[];
+   double vwapLow[];
+   bool haveVWAPTailSeries = false;
+   int totalBars = Bars(G_IndicatorOverlay.chartSymbol, G_IndicatorOverlay.chartPeriod);
+   if(totalBars >= 3)
+   {
+      int vwapDepth = MathMin(totalBars, 2500);
+      MqlRates vwapRates[];
+      ArraySetAsSeries(vwapRates, true);
+      int vwapCopied = CopyRates(G_IndicatorOverlay.chartSymbol, G_IndicatorOverlay.chartPeriod, 0, vwapDepth, vwapRates);
+      if(vwapCopied >= 2)
+      {
+         ComputeOverlayVWAPSeries(vwapRates, vwapCopied, vwap1, vwap3, vwapHigh, vwapLow);
+         haveVWAPTailSeries = true;
+      }
+   }
 
    int tailSeries[4] =
       {
@@ -817,18 +881,59 @@ void UpdateIndicatorOverlayTail()
    {
       string token = OverlaySeriesToken(tailSeries[j]);
       string name = MBV_PREFIX + "TAIL_" + token;
+      string liveName = MBV_PREFIX + "LIVE_" + token;
 
-      if(!OverlaySeriesEnabled(tailSeries[j]) || tailValues[j] <= 0.0)
+      double previousValue = EMPTY_VALUE;
+      double currentValue = tailValues[j];
+
+      if(haveVWAPTailSeries)
+      {
+         switch(tailSeries[j])
+         {
+            case OVERLAY_SERIES_VWAP1:
+               previousValue = vwap1[1];
+               currentValue = vwap1[0];
+               break;
+            case OVERLAY_SERIES_VWAP3:
+               previousValue = vwap3[1];
+               currentValue = vwap3[0];
+               break;
+            case OVERLAY_SERIES_VWAP_HIGH:
+               previousValue = vwapHigh[1];
+               currentValue = vwapHigh[0];
+               break;
+            case OVERLAY_SERIES_VWAP_LOW:
+               previousValue = vwapLow[1];
+               currentValue = vwapLow[0];
+               break;
+         }
+      }
+
+      if(!OverlaySeriesEnabled(tailSeries[j]) ||
+         !OverlayIsDrawableValue(previousValue) ||
+         !OverlayIsDrawableValue(currentValue) ||
+         currentValue <= 0.0)
       {
          ObjectDelete(chartID, name);
+         ObjectDelete(chartID, liveName);
          continue;
       }
 
       OverlayUpsertTrendSegment(name,
                                 rates[1].time,
-                                tailValues[j],
+                                previousValue,
+                                rates[0].time,
+                                currentValue,
+                                OverlaySeriesColor(tailSeries[j]),
+                                OverlaySeriesStyle(tailSeries[j]),
+                                OverlaySeriesWidth(tailSeries[j]),
+                                OverlaySeriesDescription(tailSeries[j]));
+
+      OverlayUpsertTrendSegment(liveName,
+                                rates[0].time,
+                                currentValue,
                                 tailEndTime,
-                                tailValues[j],
+                                currentValue,
                                 OverlaySeriesColor(tailSeries[j]),
                                 OverlaySeriesStyle(tailSeries[j]),
                                 OverlaySeriesWidth(tailSeries[j]),
@@ -836,21 +941,36 @@ void UpdateIndicatorOverlayTail()
    }
 
    string fillName = MBV_PREFIX + "TAIL_FILL";
+   string liveFillName = MBV_PREFIX + "LIVE_FILL";
    if(OverlayVWAPCloudEnabled() &&
-      SymbolData[chartIdx].VWAP2_High.Value > 0.0 &&
-      SymbolData[chartIdx].VWAP2_Low.Value > 0.0)
+      haveVWAPTailSeries &&
+      OverlayIsDrawableValue(vwapHigh[1]) &&
+      OverlayIsDrawableValue(vwapLow[1]) &&
+      OverlayIsDrawableValue(vwapHigh[0]) &&
+      OverlayIsDrawableValue(vwapLow[0]) &&
+      vwapHigh[0] > 0.0 &&
+      vwapLow[0] > 0.0)
    {
       OverlayUpsertFillSegment(fillName,
                                rates[1].time,
+                               rates[0].time,
+                               MathMax(vwapHigh[1], vwapHigh[0]),
+                               MathMin(vwapLow[1], vwapLow[0]),
+                               InpVWAPCloudColor,
+                               OverlayCloudDescription());
+
+      OverlayUpsertFillSegment(liveFillName,
+                               rates[0].time,
                                tailEndTime,
-                               SymbolData[chartIdx].VWAP2_High.Value,
-                               SymbolData[chartIdx].VWAP2_Low.Value,
+                               vwapHigh[0],
+                               vwapLow[0],
                                InpVWAPCloudColor,
                                OverlayCloudDescription());
    }
    else
    {
       ObjectDelete(chartID, fillName);
+      ObjectDelete(chartID, liveFillName);
    }
 }
 

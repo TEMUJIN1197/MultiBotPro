@@ -7,6 +7,90 @@
 #property copyright "Copyright 2025, MetaQuotes Ltd."
 #property link      "https://discord.com/channels/929723953415589918/929723953415589920"
 
+double CalculateGridStartLotFromRisk(string execSymbol, int symbolIndex, double entryPrice,
+                                      double stopLoss, ENUM_ORDER_TYPE orderType)
+  {
+   double lotSize = (GridFixedLot > 0.0) ? GridFixedLot : FixedLot;
+
+   if(GridRiskType == RISK_FIXED_LOT)
+      return lotSize;
+
+   if(GridRiskType == RISK_PERCENT_EQUITY ||
+      GridRiskType == RISK_PERCENT_BALANCE ||
+      GridRiskType == RISK_FIXED_MONEY)
+     {
+      double tickVal  = SymbolInfoDouble(execSymbol, SYMBOL_TRADE_TICK_VALUE);
+      double tickSize = SymbolInfoDouble(execSymbol, SYMBOL_TRADE_TICK_SIZE);
+
+      // When no explicit SL is provided, derive the risk distance from the
+      // grid step — the distance the price would need to move against the trade
+      // to reach the next grid level. This gives a meaningful lot size even when
+      // the user has not set a hard stop loss on grid entries.
+      if(stopLoss <= 0 && symbolIndex >= 0 && tickSize > 0 && tickVal > 0)
+        {
+         double point = SymbolInfoDouble(execSymbol, SYMBOL_POINT);
+         if(point <= 0.0) point = 1.0;
+
+         double gridDist = 0.0;
+         if(GridDistanceType == GRID_DIST_POINTS)
+           {
+            gridDist = GridDistance * point;
+           }
+         else // GRID_DIST_ATR
+           {
+            double atr[1];
+            if(symbolIndex < ArraySize(SymbolData) &&
+               CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 1, 1, atr) > 0)
+               gridDist = atr[0] * GridDistance;
+            else
+               gridDist = MinGridDistance * point;
+           }
+
+         double minDist = MinGridDistance * point;
+         if(gridDist < minDist) gridDist = minDist;
+
+         // One grid step against the direction acts as the effective SL distance
+         stopLoss = (orderType == ORDER_TYPE_BUY)
+                    ? entryPrice - gridDist
+                    : entryPrice + gridDist;
+
+         Print(execSymbol, " [GridRisk] No SL set — using grid step (",
+               DoubleToString(gridDist / point, 0), " pts) as effective SL distance for lot sizing.");
+        }
+
+      if(tickSize <= 0 || tickVal <= 0 || stopLoss <= 0)
+        {
+         if(GridRiskType == RISK_FIXED_MONEY && stopLoss <= 0)
+            Print("ERROR: Grid fixed money risk: could not derive SL distance. Reverting to GridFixedLot.");
+         return lotSize;
+        }
+
+      double priceDist = MathAbs(entryPrice - stopLoss);
+      double profitPerLot = (priceDist / tickSize) * tickVal;
+      if(profitPerLot <= 0.000001)
+         return lotSize;
+
+      double riskAmt = 0.0;
+      if(GridRiskType == RISK_FIXED_MONEY)
+         riskAmt = GridRiskMoney;
+      else if(GridRiskType == RISK_PERCENT_EQUITY)
+         riskAmt = AccountInfoDouble(ACCOUNT_EQUITY) * (GridRiskPercent / 100.0);
+      else
+         riskAmt = AccountInfoDouble(ACCOUNT_BALANCE) * (GridRiskPercent / 100.0);
+
+      if(riskAmt > 0.0)
+         lotSize = riskAmt / profitPerLot;
+
+      string typeStr = (GridRiskType == RISK_FIXED_MONEY) ? "FixedMoney" : "Percent";
+      Print(execSymbol, " Grid ", typeStr, " Calc: Dist=", DoubleToString(priceDist, 5),
+            " | Val/Lot=$", DoubleToString(profitPerLot, 2),
+            " | TargetRisk=$", DoubleToString(riskAmt, 2),
+            " -> Lots: ", DoubleToString(lotSize, 2));
+     }
+
+   return lotSize;
+  }
+
 //+------------------------------------------------------------------+
 //| Calculate lot size for symbol (UPDATED with Fixed Money Risk)    |
 //+------------------------------------------------------------------+
@@ -80,14 +164,14 @@ double CalculateLotSize(int symbolIndex, double entryPrice, double stopLoss, ENU
               }
             else
               {
-               // Safety Fallback if step is invalid
-               lotSize = (GridFixedLot > 0.0) ? GridFixedLot : FixedLot;
+               // Safety fallback if step is invalid
+               lotSize = CalculateGridStartLotFromRisk(execSymbol, symbolIndex, entryPrice, stopLoss, orderType);
               }
            }
          else
            {
-            // Standard Fixed Logic fallback for Grid
-            lotSize = (GridFixedLot > 0.0) ? GridFixedLot : FixedLot;
+            // Standard grid fallback model: fixed lot, percent risk, or fixed money risk.
+            lotSize = CalculateGridStartLotFromRisk(execSymbol, symbolIndex, entryPrice, stopLoss, orderType);
            }
         }
       // ==============================================================================
@@ -109,8 +193,14 @@ double CalculateLotSize(int symbolIndex, double entryPrice, double stopLoss, ENU
             // B. Get Tick Data for Accuracy
             double tickVal  = SymbolInfoDouble(execSymbol, SYMBOL_TRADE_TICK_VALUE);
             double tickSize = SymbolInfoDouble(execSymbol, SYMBOL_TRADE_TICK_SIZE);
-            
+
             // C. Validate Data (Risk Calc requires a valid StopLoss and valid broker data)
+            if(tickSize <= 0)
+               Print("WARNING: CalculateLotSize() for ", execSymbol, " — tickSize is ", tickSize, " (invalid). Unable to calculate lot size.");
+
+            if(tickVal <= 0)
+               Print("WARNING: CalculateLotSize() for ", execSymbol, " — tickVal is ", tickVal, " (invalid). Unable to calculate lot size.");
+
             if(tickSize > 0 && tickVal > 0 && stopLoss > 0)
               {
                // 1. Calculate Distance in Price Units (e.g., 1.1000 - 1.0900 = 0.0100)

@@ -5,22 +5,17 @@
 //|                     Ported from CustomChartCreator_v3            |
 //+------------------------------------------------------------------+
 #include "MultiBotPro_Defines.mqh"
+#include "MultiBotPro_CustomSymbolPublisher.mqh"
 
-class CCustomTimeEngine
+class CCustomTimeEngine : public CCustomSymbolPublisher
 {
 private:
    string   m_symbol;
-   string   m_customSymbol;
    long     m_secondsPerBar;
    datetime m_lastBarTime;
 
    long     m_chartID;
    datetime m_lastVisualUpdate;
-   long     m_lastLiveTickMsc;
-   bool     m_tickMirroringEnabled;
-   bool     m_tickMirrorWarningLogged;
-   int      m_tickMirrorFailureCount;
-   ulong    m_tickMirrorRetryAfterMs;
 
    double   m_liveOpen;
    double   m_liveHigh;
@@ -32,9 +27,7 @@ private:
 
 public:
    CCustomTimeEngine() : m_secondsPerBar(60), m_lastBarTime(0), m_chartID(0),
-                         m_lastVisualUpdate(0), m_lastLiveTickMsc(0),
-                         m_tickMirroringEnabled(true), m_tickMirrorWarningLogged(false),
-                         m_tickMirrorFailureCount(0), m_tickMirrorRetryAfterMs(0),
+                         m_lastVisualUpdate(0),
                          m_liveOpen(0), m_liveHigh(0), m_liveLow(0), m_liveClose(0),
                          m_liveTickVolume(0),
                          m_lastSourceBid(0), m_lastSourceAsk(0) {}
@@ -47,11 +40,7 @@ public:
       m_lastBarTime = 0;
       m_chartID = FindChartBySymbol(m_customSymbol);
       m_lastVisualUpdate = 0;
-      m_lastLiveTickMsc = 0;
-      m_tickMirroringEnabled = true;
-      m_tickMirrorWarningLogged = false;
-      m_tickMirrorFailureCount = 0;
-      m_tickMirrorRetryAfterMs = 0;
+      ResetPublisherState();
       m_liveOpen = 0;
       m_liveHigh = 0;
       m_liveLow = 0;
@@ -80,19 +69,46 @@ public:
    bool BuildHistory(int daysBack)
    {
       Print("Custom Timeframe Build: ", m_symbol, " -> ", m_customSymbol, " (", m_secondsPerBar, "s)");
-      CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
 
       MqlTick ticks[];
-      datetime start = TimeCurrent() - (daysBack * 86400);
-      int totalTicks = CopyTicksRange(m_symbol, ticks, COPY_TICKS_ALL, start * 1000, TimeCurrent() * 1000);
+      datetime fullStart = TimeCurrent() - (daysBack * 86400);
+      datetime start = fullStart;
+      bool incremental = false;
+      if(Bars(m_customSymbol, PERIOD_M1) > 2)
+      {
+         MqlRates existing[];
+         int copied = CopyRates(m_customSymbol, PERIOD_M1, 0, 2, existing);
+         if(copied > 0)
+         {
+            datetime lastTime = existing[copied - 1].time;
+            start = MathMax(fullStart, lastTime - 7200);
+            CustomRatesDelete(m_customSymbol, start, LONG_MAX);
+            CustomTicksDelete(m_customSymbol, (long)start * 1000, LONG_MAX);
+            incremental = true;
+            Print("[CustomTime] Incremental build for ", m_customSymbol,
+                  ": replaying from ", start, " after existing bar ", lastTime);
+         }
+      }
+
+      if(!incremental)
+      {
+         CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
+         CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
+      }
+
+      int totalTicks = CopyTicksRange(m_symbol, ticks, COPY_TICKS_ALL,
+                                      (ulong)start * 1000, (ulong)TimeCurrent() * 1000);
       if(totalTicks <= 0)
-         return false;
+      {
+         // Fallback: build from M1 rates when tick data is unavailable.
+         return BuildHistoryFromRates(daysBack, start, incremental);
+      }
 
       MqlRates rates[];
       ArrayResize(rates, totalTicks);
       int barIndex = 0;
       datetime currentBarStart = 0;
+      datetime lastTickTime = 0;
 
       for(int i = 0; i < totalTicks; i++)
       {
@@ -100,14 +116,19 @@ public:
          if(tickPrice <= 0)
             continue;
 
-         datetime barTime = (datetime)(ticks[i].time - (ticks[i].time % m_secondsPerBar));
-         if(barTime != currentBarStart)
+         datetime barBucket = (datetime)(ticks[i].time - (ticks[i].time % m_secondsPerBar));
+         if(barBucket != currentBarStart)
          {
             if(currentBarStart != 0)
+            {
+               // Commit the previous bar: bar time = the last tick that fell in it.
+               rates[barIndex].time = lastTickTime;
                barIndex++;
+            }
 
-            currentBarStart = barTime;
-            rates[barIndex].time = currentBarStart;
+            currentBarStart = barBucket;
+            lastTickTime = ticks[i].time;
+            rates[barIndex].time = ticks[i].time; // provisional; updated each tick
             rates[barIndex].open = tickPrice;
             rates[barIndex].high = tickPrice;
             rates[barIndex].low = tickPrice;
@@ -118,16 +139,18 @@ public:
          }
          else
          {
-            if(tickPrice > rates[barIndex].high)
-               rates[barIndex].high = tickPrice;
-            if(tickPrice < rates[barIndex].low)
-               rates[barIndex].low = tickPrice;
+            lastTickTime = ticks[i].time;
+            if(tickPrice > rates[barIndex].high) rates[barIndex].high = tickPrice;
+            if(tickPrice < rates[barIndex].low)  rates[barIndex].low  = tickPrice;
             rates[barIndex].close = tickPrice;
             rates[barIndex].tick_volume++;
          }
       }
+      // The last bar (live) stays with its provisional last-tick time.
+      rates[barIndex].time = lastTickTime;
 
-      if(!CustomRatesUpdate(m_customSymbol, rates, barIndex + 1))
+      int barCount = barIndex + 1;
+      if(!CustomRatesUpdate(m_customSymbol, rates, barCount))
       {
          Print("[CustomTime] ERROR: CustomRatesUpdate failed for ", m_customSymbol, " (Err: ", _LastError, ")");
          return false;
@@ -150,6 +173,84 @@ public:
       m_lastSourceBid = lastBid;
       m_lastSourceAsk = lastAsk;
       PublishCurrentLiveState(ticks[totalTicks - 1].time_msc, false);
+      return true;
+   }
+
+   // Fallback history build using M1 rates when tick data is unavailable.
+   // Bar time = last second of the M1 bar that closes within the custom bucket.
+   bool BuildHistoryFromRates(int daysBack, datetime requestedStart = 0, bool incremental = false)
+   {
+      Print("[CustomTime] No tick data — building from M1 rates for ", m_customSymbol);
+      MqlRates src[];
+      datetime start = (requestedStart > 0) ? requestedStart : (TimeCurrent() - (daysBack * 86400));
+      if(!incremental)
+      {
+         CustomRatesDelete(m_customSymbol, 0, LONG_MAX);
+         CustomTicksDelete(m_customSymbol, 0, LONG_MAX);
+      }
+      int total = CopyRates(m_symbol, PERIOD_M1, start, TimeCurrent(), src);
+      if(total <= 0)
+         return false;
+
+      MqlRates rates[];
+      ArrayResize(rates, total);
+      int barIndex = 0;
+      datetime currentBarStart = 0;
+
+      for(int i = 0; i < total; i++)
+      {
+         datetime barBucket = (datetime)(src[i].time - (src[i].time % m_secondsPerBar));
+         if(barBucket != currentBarStart)
+         {
+            if(currentBarStart != 0)
+            {
+               // Commit with last-tick time = last second of previous M1 bar.
+               rates[barIndex].time = src[i].time - 1;
+               barIndex++;
+            }
+            currentBarStart = barBucket;
+            rates[barIndex].time = src[i].time + 59; // provisional
+            rates[barIndex].open = src[i].open;
+            rates[barIndex].high = src[i].high;
+            rates[barIndex].low = src[i].low;
+            rates[barIndex].close = src[i].close;
+            rates[barIndex].tick_volume = src[i].tick_volume;
+            rates[barIndex].spread = 0;
+            rates[barIndex].real_volume = 0;
+         }
+         else
+         {
+            if(src[i].high > rates[barIndex].high) rates[barIndex].high = src[i].high;
+            if(src[i].low  < rates[barIndex].low)  rates[barIndex].low  = src[i].low;
+            rates[barIndex].close = src[i].close;
+            rates[barIndex].tick_volume += src[i].tick_volume;
+            rates[barIndex].time = src[i].time + 59; // keep updating to last M1 bar end
+         }
+      }
+
+      int barCount = barIndex + 1;
+      if(!CustomRatesUpdate(m_customSymbol, rates, barCount))
+      {
+         Print("[CustomTime] ERROR: CustomRatesUpdate (rates fallback) failed. Err=", _LastError);
+         return false;
+      }
+
+      m_lastBarTime = currentBarStart;
+      m_lastLiveTickMsc = 0;
+      m_tickMirroringEnabled = true;
+      m_tickMirrorWarningLogged = false;
+      m_tickMirrorFailureCount = 0;
+      m_tickMirrorRetryAfterMs = 0;
+      m_liveOpen = rates[barIndex].open;
+      m_liveHigh = rates[barIndex].high;
+      m_liveLow = rates[barIndex].low;
+      m_liveClose = rates[barIndex].close;
+      m_liveTickVolume = rates[barIndex].tick_volume;
+
+      double lastBid = src[total - 1].close;
+      m_lastSourceBid = lastBid;
+      m_lastSourceAsk = lastBid;
+      PublishCurrentLiveState((long)(src[total - 1].time + 59) * 1000, false);
       return true;
    }
 
@@ -288,9 +389,8 @@ private:
       rate[0].real_volume = 0;
 
       ResetLastError();
-      if(!CustomRatesUpdate(m_customSymbol, rate, 1))
+      if(!SafeCustomRatesUpdate(rate, 1))
       {
-         Print("[CustomTime] WARNING: Live rate update failed for ", m_customSymbol, " (Err: ", _LastError, ")");
          return;
       }
 
@@ -316,50 +416,8 @@ private:
       CustomSymbolSetDouble(m_customSymbol, SYMBOL_ASK, ask);
       CustomSymbolSetDouble(m_customSymbol, SYMBOL_LAST, last);
 
-      if(!m_tickMirroringEnabled)
-      {
-         if(!allowMirrorDegrade)
-            return;
-
-         if(GetTickCount() < m_tickMirrorRetryAfterMs)
-            return;
-
-         m_tickMirroringEnabled = true;
-      }
-
       long liveTickMsc = ReserveCustomTickTimeMsc((tickTimeMsc > 0) ? tickTimeMsc : ((long)syntheticTime * 1000));
-
-      MqlTick liveTick[1];
-      ZeroMemory(liveTick);
-      liveTick[0].time = (datetime)(liveTickMsc / 1000);
-      liveTick[0].time_msc = liveTickMsc;
-      liveTick[0].bid = bid;
-      liveTick[0].ask = ask;
-      liveTick[0].last = last;
-      liveTick[0].volume = 1;
-      liveTick[0].volume_real = 0.0;
-      liveTick[0].flags = TICK_FLAG_BID | TICK_FLAG_ASK | TICK_FLAG_LAST;
-
-      ResetLastError();
-      if(!CustomTicksAdd(m_customSymbol, liveTick, 1))
-      {
-         int tickError = _LastError;
-         if(!allowMirrorDegrade)
-            return;
-
-         m_tickMirrorFailureCount++;
-         if(m_tickMirrorFailureCount >= 3)
-         {
-            m_tickMirrorRetryAfterMs = GetTickCount() + 5000;
-            DisableTickMirroring("live update", tickError);
-         }
-         return;
-      }
-
-      m_tickMirroringEnabled = true;
-      m_tickMirrorFailureCount = 0;
-      m_tickMirrorWarningLogged = false;
-      m_lastLiveTickMsc = liveTickMsc;
+      PublishLiveStateTick(syntheticTime, liveTickMsc, bid, ask, last, allowMirrorDegrade);
    }
 
    long ReserveCustomTickTimeMsc(long candidateTimeMsc)
@@ -373,17 +431,6 @@ private:
          normalizedTimeMsc = minTimeMsc;
 
       return normalizedTimeMsc;
-   }
-
-   void DisableTickMirroring(string stage, int errorCode)
-   {
-      m_tickMirroringEnabled = false;
-      if(m_tickMirrorWarningLogged)
-         return;
-
-      m_tickMirrorWarningLogged = true;
-      Print("[CustomTime] WARNING: Custom tick mirroring disabled for ", m_customSymbol,
-            " after ", stage, " failed (Err: ", errorCode, "). Rates-only mode will continue.");
    }
 
    long FindChartBySymbol(string sym)

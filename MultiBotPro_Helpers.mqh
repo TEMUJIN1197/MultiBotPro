@@ -974,12 +974,28 @@ void DrawNewsLines()
 //+------------------------------------------------------------------+
 bool IsAppTrade(long tradeMagic)
   {
-// 1. Always accept the Bot's own trades
+// 1. Manual trades pass through in semi-auto/mixed regardless of role
+   if(OperationMode != MODE_AUTO && tradeMagic == 0)
+      return true;
+
+// 2. Always accept the bot's base magic (back-compat for trades opened before
+//    per-worker isolation was introduced, and the natural match for legacy mode).
    if(tradeMagic == (long)MagicNumber)
       return true;
 
-// 2. If Mode is Semi-Auto or Mixed, accept Manual Trades (Magic 0)
-   if(OperationMode != MODE_AUTO && tradeMagic == 0)
+// 3. Coordinator owns ALL its workers' offsets so emergency-close routines
+//    (daily limit, equity stop, etc.) reach every worker's positions.
+   if(IsParallelCoordinatorMode())
+   {
+      long offset = tradeMagic - (long)MagicNumber;
+      if(offset > 0 && offset < (long)MBP_WORKER_MAGIC_MAX_OFFSETS * MBP_WORKER_MAGIC_STRIDE &&
+         (offset % MBP_WORKER_MAGIC_STRIDE) == 0)
+         return true;
+   }
+
+// 4. Workers only own their own offset slot.
+   if(IsParallelWorkerMode() && G_EffectiveMagicNumber > 0 &&
+      tradeMagic == (long)G_EffectiveMagicNumber)
       return true;
 
    return false;
@@ -1016,6 +1032,16 @@ bool IsPositionInBasket(int symbolIndex, string comment)
    int bid = ExtractBasketId(comment);
    if(bid < 0) return SymbolData[symbolIndex].IsPrimaryBasket;
    return (bid == SymbolData[symbolIndex].BasketId);
+  }
+
+/// Convenience overload: GetOrCreateBasketState by symbol index + basketId.
+/// This is the primary call form used by GridZone/TradeEntry functions.
+/// Defined here (after SymbolData[] global is declared in Globals.mqh).
+SBasketState* GetOrCreateBasketState(int symbolIndex, int basketId)
+  {
+   if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
+      return NULL;
+   return GetOrCreateBasketState(SymbolData[symbolIndex], basketId);
   }
 
 string BasketScopedObjectName(int symbolIndex, string prefix, string symbol)
@@ -1073,12 +1099,35 @@ bool IsBasketActiveIndex(int idx)
    return HasActiveNormalBasketState(idx);
   }
 
+bool BasketSymbolMatchesIndex(int idx, string symbol)
+  {
+   if(idx < 0 || idx >= ArraySize(SymbolData))
+      return false;
+
+   string targetBase = GetBaseSymbol(symbol);
+   if(targetBase == "")
+      targetBase = symbol;
+
+   string indexSymbol = SymbolData[idx].symbol;
+   string indexAnalysis = GetManagedAnalysisSymbol(idx);
+   string indexBase = GetManagedExecutionSymbol(idx);
+   if(indexBase == "")
+      indexBase = GetBaseSymbol(indexAnalysis);
+
+   return (indexSymbol == symbol ||
+           indexAnalysis == symbol ||
+           indexBase == symbol ||
+           indexBase == targetBase ||
+           GetBaseSymbol(indexSymbol) == targetBase ||
+           GetBaseSymbol(indexAnalysis) == targetBase);
+  }
+
 int CountActiveBasketsForSymbol(string symbol)
   {
    int count = 0;
    for(int i = 0; i < ArraySize(SymbolData); i++)
      {
-      if(SymbolData[i].symbol != symbol) continue;
+      if(!BasketSymbolMatchesIndex(i, symbol)) continue;
       if(IsBasketActiveIndex(i)) count++;
      }
    return count;
@@ -1094,8 +1143,7 @@ int GetNextBasketIdForSymbol(string symbol)
    int nextId = 1;
    for(int i = 0; i < ArraySize(SymbolData); i++)
      {
-      if(GetManagedAnalysisSymbol(i) != symbol && GetManagedExecutionSymbol(i) != symbol)
-         continue;
+      if(!BasketSymbolMatchesIndex(i, symbol)) continue;
       if(!IsBasketActiveIndex(i))
          continue;
 
@@ -1116,7 +1164,7 @@ bool BasketDirectionAllowed(string symbol, ENUM_ORDER_TYPE orderType)
 
    for(int i = 0; i < ArraySize(SymbolData); i++)
      {
-      if(SymbolData[i].symbol != symbol) continue;
+      if(!BasketSymbolMatchesIndex(i, symbol)) continue;
       if(!IsBasketActiveIndex(i)) continue;
 
       ENUM_POSITION_TYPE existing = SymbolData[i].BasketDirection;
@@ -1144,7 +1192,7 @@ bool BasketDistanceOk(int symbolIndex, double entryPrice)
 
    for(int i = 0; i < ArraySize(SymbolData); i++)
      {
-      if(SymbolData[i].symbol != symbol) continue;
+      if(!BasketSymbolMatchesIndex(i, symbol)) continue;
       if(!IsBasketActiveIndex(i)) continue;
 
       double otherEntry = SymbolData[i].BasketInitialEntry;
@@ -1182,6 +1230,9 @@ int CreateBasketClone(int baseIndex, ENUM_ORDER_TYPE orderType)
    SymbolData[newIndex].BasketActive = false;
    SymbolData[newIndex].BasketInitialEntry = 0.0;
    SymbolData[newIndex].BasketDirection = (orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+
+   // BUG-B6 FIX: Resize parallel arrays to match the new SymbolData size
+   InitFilterTracker(newIndex);
 
    return newIndex;
   }

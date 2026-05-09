@@ -186,14 +186,25 @@ double GetDashboardSymbolDebt(const int symbolIndex, const bool critical)
    if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
       return 0.0;
 
-   string trackedSymbol = SymbolData[symbolIndex].symbol;
+   string trackedSymbol = GetManagedBaseSymbol(symbolIndex);
+   if(trackedSymbol == "")
+      trackedSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(trackedSymbol == "")
+      trackedSymbol = SymbolData[symbolIndex].symbol;
    double totalDebt = 0.0;
 
    for(int i = 0; i < ArraySize(SymbolData); i++)
    {
       if(!SymbolData[i].active)
          continue;
-      if(SymbolData[i].symbol != trackedSymbol)
+
+      string symbolKey = GetManagedBaseSymbol(i);
+      if(symbolKey == "")
+         symbolKey = GetBaseSymbol(SymbolData[i].symbol);
+      if(symbolKey == "")
+         symbolKey = SymbolData[i].symbol;
+
+      if(StringCompare(symbolKey, trackedSymbol, false) != 0)
          continue;
 
       totalDebt += critical ? SymbolData[i].AccumulatedCriticalLoss : SymbolData[i].AccumulatedPruningLoss;

@@ -26,8 +26,11 @@ Source: "PythonApp\init_database.exe"; DestDir: "{tmp}\Payload\Experts\MultiBotP
 Source: "PythonApp\ShadowMaster.bmp"; DestDir: "{tmp}\Payload\Experts\MultiBotPro2\PythonApp"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "PythonApp\README.txt"; DestDir: "{tmp}\Payload\Experts\MultiBotPro2\PythonApp"; Flags: ignoreversion skipifsourcedoesntexist
 
-; Full Python Environment (If needed for fallback or advanced extensions)
-Source: "PythonApp\WinPython\*"; DestDir: "{tmp}\Payload\Experts\MultiBotPro2\PythonApp\WinPython"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; WinPython runtime is no longer bundled. ShadowMaster.exe is now a self-contained
+; PyInstaller binary with its own embedded Python interpreter and dependencies, so
+; the standalone WinPython distribution would just add ~89 MB to the installer for
+; no functional benefit. Re-enable only if a future tool needs raw Python access.
+; Source: "PythonApp\WinPython\*"; DestDir: "{tmp}\Payload\Experts\MultiBotPro2\PythonApp\WinPython"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 
 [Code]
@@ -149,7 +152,9 @@ begin
         CopyDir(PayloadSrc + '\Experts', DestBase + '\MQL5\Experts');
         CopyDir(PayloadSrc + '\Libraries', DestBase + '\MQL5\Libraries');
 
-        // Run database initialization script
+        // Database initialization: handled by the EA itself on first launch via
+        // V3_EnsureRuntimeSchema() in hedgeBridge.mqh — no external script needed.
+        // Kept as a soft-fallback in case a future build ships init_database.exe.
         InitDbExe := DestBase + '\MQL5\Experts\MultiBotPro2\PythonApp\init_database.exe';
         if FileExists(InitDbExe) then
         begin
