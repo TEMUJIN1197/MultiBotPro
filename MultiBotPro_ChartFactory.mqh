@@ -310,6 +310,7 @@ private:
 
       if(m_chartID > 0)
       {
+         CloseDuplicateChartsForSymbol(m_customSymbol, m_chartID);
          if(m_chartID != previousChartID)
             ApplyChartStyles(m_chartID);
          return true;
@@ -348,6 +349,41 @@ private:
          curr = ChartNext(curr);
       }
       return 0;
+   }
+
+   int CloseDuplicateChartsForSymbol(const string sym, const long keepChartId)
+   {
+      if(sym == "" || keepChartId <= 0)
+         return 0;
+
+      int closed = 0;
+      long curr = ChartFirst();
+      while(curr >= 0)
+      {
+         long next = ChartNext(curr);
+         if(curr != keepChartId && ChartSymbol(curr) == sym)
+         {
+            ResetLastError();
+            if(ChartClose(curr))
+            {
+               closed++;
+               Print("[ChartFactory] Closed duplicate chart ", curr,
+                     " for generated symbol ", sym, "; keeping chart ", keepChartId, ".");
+            }
+            else if(_LastError == 4102)
+            {
+               closed++;
+            }
+            else
+            {
+               Print("[ChartFactory] Duplicate chart close failed for ", sym,
+                     " on chart ", curr, " Error=", _LastError);
+            }
+         }
+         curr = next;
+      }
+
+      return closed;
    }
 
    int ResolveVisualSymbolIndex()

@@ -1789,6 +1789,84 @@ int MBP_CloseDuplicateAssignedWorkerCharts(const string symbol,
    return closed;
 }
 
+int MBP_CloseDuplicateWorkerChartsForChartSymbol(const string chartSymbol,
+                                                 const string coordinatorKey,
+                                                 const long keepChartId,
+                                                 const long excludedChartId = 0)
+{
+   if(chartSymbol == "" || keepChartId <= 0)
+      return 0;
+
+   int closed = 0;
+   long chartId = ChartFirst();
+   while(chartId >= 0)
+   {
+      long nextChartId = ChartNext(chartId);
+      if(chartId != keepChartId && chartId != excludedChartId &&
+         StringCompare(ChartSymbol(chartId), chartSymbol, false) == 0)
+      {
+         string assignedSymbol = "";
+         string assignedSymbolsCsv = "";
+         string assignedChartSymbol = "";
+         string assignedCoordinatorKey = "";
+         long assignedCoordinatorChartId = 0;
+         string assignedSignature = "";
+         datetime assignedAt = 0;
+         bool hasAssignment = MBP_ReadWorkerAssignment(chartId,
+                                                       assignedSymbol,
+                                                       assignedSymbolsCsv,
+                                                       assignedChartSymbol,
+                                                       assignedCoordinatorKey,
+                                                       assignedCoordinatorChartId,
+                                                       assignedSignature,
+                                                       assignedAt);
+         bool ours = false;
+         if(hasAssignment)
+         {
+            ours = MBP_CoordinatorKeyMatchesRuntime(assignedCoordinatorKey, coordinatorKey);
+            if(assignedChartSymbol != "" && StringCompare(assignedChartSymbol, chartSymbol, false) != 0)
+               ours = false;
+         }
+         else
+         {
+            ours = MBP_HasWorkerLaunchMarker(chartId);
+         }
+
+         if(ours)
+         {
+            ResetLastError();
+            if(ChartClose(chartId))
+            {
+               string assignmentFile = MBP_WorkerAssignmentFile(chartId);
+               if(FileIsExist(assignmentFile, FILE_COMMON))
+                  FileDelete(assignmentFile, FILE_COMMON);
+               MBP_ClearWorkerLaunchMarker(chartId);
+               closed++;
+               Print(EmojiWarning(), " Closed duplicate worker chart for ", chartSymbol,
+                     " on chart ", chartId, "; keeping chart ", keepChartId, ".");
+            }
+            else if(_LastError == 4102)
+            {
+               string assignmentFile = MBP_WorkerAssignmentFile(chartId);
+               if(FileIsExist(assignmentFile, FILE_COMMON))
+                  FileDelete(assignmentFile, FILE_COMMON);
+               MBP_ClearWorkerLaunchMarker(chartId);
+               closed++;
+            }
+            else
+            {
+               Print(EmojiWarning(), " Duplicate worker chart close failed for ", chartSymbol,
+                     " on chart ", chartId, " Error=", _LastError);
+            }
+         }
+      }
+
+      chartId = nextChartId;
+   }
+
+   return closed;
+}
+
 bool MBP_IsAssignedWorkerChart(const long chartId,
                                const string symbol,
                                const string coordinatorKey,
@@ -3141,6 +3219,10 @@ void MasterEnsureRuntimeWorkers()
       }
 
       G_WorkerSlots[i].chartId = targetChartId;
+      MBP_CloseDuplicateWorkerChartsForChartSymbol(workerChartSymbol,
+                                                   coordinatorKey,
+                                                   targetChartId,
+                                                   ChartID());
       if(newlyAssigned || templateRequired)
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
 
