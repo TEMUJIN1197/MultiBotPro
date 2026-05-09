@@ -2172,6 +2172,8 @@ bool CRenkoEngine::EnsureWorkerSession()
          return false;
       }
       m_workerSessionReady = true;
+      Print("[Renko] DLL session opened for ", m_customSymbol,
+            " from ", m_symbol, " (key=", m_workerSessionKey, ").");
    }
 
    if(WorkerSessionNeedsReseed())
@@ -2195,6 +2197,10 @@ bool CRenkoEngine::EnsureWorkerSession()
       m_workerLastReseedMs = GetTickCount();
       m_workerSessionEnabled = true;
       m_workerStallCount = 0;
+      Print("[Renko] DLL acceleration active for ", m_customSymbol,
+            " block=", DoubleToString(seedBlockSize, digits),
+            " anchor=", DoubleToString(m_anchorPrice, digits),
+            " direction=", (m_isTrendUp ? "UP" : "DOWN"), ".");
    }
 
    return true;

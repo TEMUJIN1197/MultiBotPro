@@ -9,6 +9,24 @@
 
 #define MBP_AI_PARAM_MAX_AGE_SEC 172800
 
+bool MBP_ShouldLogEntrySignalDiagnostic(const int symbolIndex, const string direction)
+  {
+   if(symbolIndex < 0 || symbolIndex >= 100)
+      return false;
+
+   static ulong lastLogMs[100] = {0};
+   static string lastDirection[100];
+
+   ulong nowMs = GetTickCount();
+   bool directionChanged = (StringCompare(lastDirection[symbolIndex], direction, false) != 0);
+   if(!directionChanged && lastLogMs[symbolIndex] > 0 && (nowMs - lastLogMs[symbolIndex]) < 60000)
+      return false;
+
+   lastLogMs[symbolIndex] = nowMs;
+   lastDirection[symbolIndex] = direction;
+   return true;
+  }
+
 //+------------------------------------------------------------------+
 //| Check entry signals (FIXED: Reverse Logic + MA Sell Fix)         |
 //+------------------------------------------------------------------+
@@ -211,8 +229,11 @@ if(PositionGetString(POSITION_SYMBOL) == execSym)
    if(finalBuySignal)
      {
       string dir = ReverseStrategy ? "REVERSED BUY (Original Sell)" : "BUY";
-      Print("🎯 ", symbol, " entry signal: ", dir);
-      Print("🧮 Execution check: RiskMode=", EnumToString(RiskMode), " | StackMode=", (StackMode ? "true" : "false"));
+      if(MBP_ShouldLogEntrySignalDiagnostic(symbolIndex, dir))
+        {
+         Print("🎯 ", symbol, " entry signal: ", dir);
+         Print("🧮 Execution check: RiskMode=", EnumToString(RiskMode), " | StackMode=", (StackMode ? "true" : "false"));
+        }
       
       // RECONCILED: Delegate all lot calculations, recovery math, and bridge 
       // handshakes strictly to the OpenTrade function.
@@ -223,8 +244,11 @@ if(PositionGetString(POSITION_SYMBOL) == execSym)
       if(finalSellSignal)
         {
          string dir = ReverseStrategy ? "REVERSED SELL (Original Buy)" : "SELL";
-         Print("🎯 ", symbol, " entry signal: ", dir);
-         Print("🧮 Execution check: RiskMode=", EnumToString(RiskMode), " | StackMode=", (StackMode ? "true" : "false"));
+         if(MBP_ShouldLogEntrySignalDiagnostic(symbolIndex, dir))
+           {
+            Print("🎯 ", symbol, " entry signal: ", dir);
+            Print("🧮 Execution check: RiskMode=", EnumToString(RiskMode), " | StackMode=", (StackMode ? "true" : "false"));
+           }
          
          // RECONCILED: Delegate all lot calculations, recovery math, and bridge 
          // handshakes strictly to the OpenTrade function.
