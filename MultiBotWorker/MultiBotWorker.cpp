@@ -106,36 +106,9 @@ double RoundPrice(const Session& session, const double price)
 Profile ResolveProfile(const Session& session)
 {
     Profile profile;
-    profile.continuationOpenPct = session.openOffsetPct;
-    profile.reversalOpenPct = session.reversalShadowPct;
-    profile.reversalDistancePct = session.reversalPct;
-
-    switch(session.family)
-    {
-        case 0:
-            profile.continuationOpenPct = 0.0;
-            profile.reversalOpenPct = 1.0;
-            profile.reversalDistancePct = 2.0;
-            break;
-        case 1:
-            if(profile.continuationOpenPct <= 0.0) profile.continuationOpenPct = 0.50;
-            if(profile.reversalOpenPct <= 0.01) profile.reversalOpenPct = 0.50;
-            if(profile.reversalDistancePct <= 1.0) profile.reversalDistancePct = 1.50;
-            break;
-        case 2:
-            profile.continuationOpenPct = 0.75;
-            profile.reversalOpenPct = 0.75;
-            profile.reversalDistancePct = 1.50;
-            break;
-        case 3:
-            profile.continuationOpenPct = 0.75;
-            profile.reversalOpenPct = 0.50;
-            profile.reversalDistancePct = 1.50;
-            break;
-        default:
-            break;
-    }
-
+    profile.continuationOpenPct = 0.0;
+    profile.reversalOpenPct = 1.0;
+    profile.reversalDistancePct = 2.0;
     return profile;
 }
 
@@ -211,8 +184,8 @@ void PushClosedBar(Session& session, long long startTime, const double open, con
     bar.timeSec = startTime;
     bar.open = RoundPrice(session, open);
     bar.close = RoundPrice(session, close);
-    bar.high = std::max({RoundPrice(session, session.boxHigh), bar.open, bar.close});
-    bar.low = std::min({RoundPrice(session, session.boxLow), bar.open, bar.close});
+    bar.high = std::max(bar.open, bar.close);
+    bar.low = std::min(bar.open, bar.close);
     bar.volume = 1;
     bar.eventTimeMsc = eventTimeMsc;
 

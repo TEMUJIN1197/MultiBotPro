@@ -126,6 +126,7 @@ private:
    bool EnsureCustomSymbolReady();
    datetime ResolveHistoryStart() const;
    SAZRenkoProfile ResolveFamilyProfile() const;
+   bool HasCleanRecentHistory();
    double NormalizePrice(double price) const;
    double GetPipSize() const;
    void RefreshBlockSize(const datetime timeRef, const bool force);
@@ -285,7 +286,8 @@ void CRenkoEngine::Init(string symbol, string customSymbol,
 
    m_blockMode = mode;
    m_blockSizeValue = val;
-   m_showWicks = wicks;
+   // This Renko feed is intended to render clean, body-only blocks.
+   m_showWicks = false;
    m_atrTimeframe = atrTf;
    m_atrPeriod = atrPeriod;
    m_adaptiveATR = adaptAtr;
@@ -321,7 +323,7 @@ bool CRenkoEngine::PrepareStartup()
       return false;
 
    bool resumed = false;
-   if(!m_forceRebuild && LoadState())
+   if(!m_forceRebuild && HasCleanRecentHistory() && LoadState())
    {
       if(ConnectHistoryToLive())
       {
@@ -337,7 +339,7 @@ bool CRenkoEngine::PrepareStartup()
       }
    }
 
-   if(!resumed)
+   if(!resumed && !m_forceRebuild && HasCleanRecentHistory())
    {
       if(ReconstructStateFromCustomSymbol())
       {
@@ -500,13 +502,15 @@ bool CRenkoEngine::BuildHistory()
    // SMART PROTECTION: If not forcing rebuild and we have data, try to resume instead of wiping.
    if(!m_forceRebuild && Bars(m_customSymbol, PERIOD_M1) > 10)
    {
-      if(ReconstructStateFromCustomSymbol())
+      if(HasCleanRecentHistory() && ReconstructStateFromCustomSymbol())
       {
          datetime incrementalFrom = MathMax((datetime)0, m_lastCommittedTime - 7200);
          Print("[Renko] Incremental build: existing history found for ", m_customSymbol,
                ". Replaying from ", incrementalFrom, " (last brick ", m_lastCommittedTime, ")");
          return ConnectHistoryToLive();
       }
+      Print("[Renko] Existing custom history failed clean-brick validation for ", m_customSymbol,
+            ". Rebuilding once to restore fixed-size staircase bars.");
    }
 
    ResetRuntimeState();
@@ -709,41 +713,50 @@ datetime CRenkoEngine::ResolveHistoryStart() const
 CRenkoEngine::SAZRenkoProfile CRenkoEngine::ResolveFamilyProfile() const
 {
    SAZRenkoProfile profile;
-   profile.continuationOpenPct = m_openOffsetPct;
-   profile.reversalOpenPct = m_reversalShadowPct;
-   profile.reversalDistancePct = m_reversalPct;
+   profile.continuationOpenPct = 0.0;
+   profile.reversalOpenPct = 1.0;
+   profile.reversalDistancePct = 2.0;
+   return profile;
+}
 
-   switch(m_renkoFamily)
+bool CRenkoEngine::HasCleanRecentHistory()
+{
+   MqlRates rates[];
+   int copied = CopyRates(m_customSymbol, PERIOD_M1, 0, 240, rates);
+   if(copied < 10)
+      return false;
+
+   double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      point = _Point;
+
+   RefreshBlockSize(TimeCurrent(), true);
+   double expectedBlock = (m_lockedBlockSize > 0.0) ? m_lockedBlockSize : m_currentBlockSizePoint;
+   if(expectedBlock <= 0.0)
+      expectedBlock = point;
+
+   double tolerance = MathMax(point * 2.0, expectedBlock * 0.02);
+   int checked = 0;
+   for(int i = 0; i < copied - 1; i++)
    {
-      case MBP_RENKO_CLASSIC:
-         profile.continuationOpenPct = 0.0;
-         profile.reversalOpenPct = 1.0;
-         profile.reversalDistancePct = 2.0;
-         break;
+      double brickOpen = NormalizePrice(rates[i].open);
+      double brickClose = NormalizePrice(rates[i].close);
+      double body = MathAbs(brickClose - brickOpen);
+      if(body < point * 0.5)
+         continue;
 
-      case MBP_RENKO_MEDIAN:
-         if(profile.continuationOpenPct <= 0.0)
-            profile.continuationOpenPct = 0.50;
-         if(profile.reversalOpenPct <= 0.01)
-            profile.reversalOpenPct = 0.50;
-         if(profile.reversalDistancePct <= 1.0)
-            profile.reversalDistancePct = 1.50;
-         break;
-
-      case MBP_RENKO_TURBO:
-         profile.continuationOpenPct = 0.75;
-         profile.reversalOpenPct = 0.75;
-         profile.reversalDistancePct = 1.50;
-         break;
-
-      case MBP_RENKO_HYBRID:
-         profile.continuationOpenPct = 0.75;
-         profile.reversalOpenPct = 0.50;
-         profile.reversalDistancePct = 1.50;
-         break;
+      double bodyHigh = MathMax(brickOpen, brickClose);
+      double bodyLow = MathMin(brickOpen, brickClose);
+      if(MathAbs(body - expectedBlock) > tolerance)
+         return false;
+      if(MathAbs(NormalizePrice(rates[i].high) - bodyHigh) > tolerance)
+         return false;
+      if(MathAbs(NormalizePrice(rates[i].low) - bodyLow) > tolerance)
+         return false;
+      checked++;
    }
 
-   return profile;
+   return (checked >= 5);
 }
 
 double CRenkoEngine::NormalizePrice(double price) const
@@ -880,6 +893,8 @@ void CRenkoEngine::ResetSessionOpenIfNeeded(const datetime tickTime)
 void CRenkoEngine::SeedFromFirstPrice(const double price, const datetime tickTime)
 {
    RefreshBlockSize(tickTime, true);
+   if(m_lockedBlockSize <= 0.0)
+      m_lockedBlockSize = m_currentBlockSizePoint;
    m_anchorPrice = NormalizeFirstBrickAnchor(price);
    m_lastClosePrice = m_anchorPrice;
    m_boxHigh = m_anchorPrice;
@@ -1006,7 +1021,7 @@ void CRenkoEngine::RefreshLiveCandidateState(const double price, const datetime 
       point = _Point;
 
    double normalizedPrice = NormalizePrice(price);
-   double blockSize = MathMax(m_currentBlockSizePoint, point);
+   double blockSize = MathMax((m_lockedBlockSize > 0.0 ? m_lockedBlockSize : m_currentBlockSizePoint), point);
    bool useReversalCandidate = m_isTrendUp
                                ? (normalizedPrice < (m_anchorPrice - point / 2.0))
                                : (normalizedPrice > (m_anchorPrice + point / 2.0));
@@ -1216,7 +1231,8 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
          m_liveCandidateTargetClose = 0.0;
          m_liveCandidateClose = m_anchorPrice;
       }
-      m_lockedBlockSize = MathMax(m_currentBlockSizePoint, point);
+      if(m_lockedBlockSize <= 0.0)
+         m_lockedBlockSize = MathMax(m_currentBlockSizePoint, point);
       blockSize = m_lockedBlockSize;
       reversalDistance = CalculateReversalDistance(blockSize);
       m_tickVolBuffer = 0;
@@ -2119,16 +2135,7 @@ bool CRenkoEngine::WorkerSessionNeedsReseed() const
    if(m_workerSeedBlockSize <= 0.0)
       return true;
 
-   if(MathAbs(m_workerSeedBlockSize - m_currentBlockSizePoint) <= (point / 2.0))
-      return false;
-
-   // Block size changed — for Classic Renko the DLL resets its window on every
-   // reseed call, so rate-limit to at most once every 30 seconds to prevent the
-   // open/close visual loop while still reacting to genuine ATR block-size changes.
-   if(m_renkoFamily == MBP_RENKO_CLASSIC)
-      return (m_workerLastReseedMs == 0 || (GetTickCount() - m_workerLastReseedMs) >= 30000);
-
-   return true;
+   return false;
 }
 
 void CRenkoEngine::BumpLivePreviewGeneration()
@@ -2159,7 +2166,7 @@ bool CRenkoEngine::EnsureWorkerSession()
 
    if(!m_workerSessionReady)
    {
-      if(MBP_RenkoOpenSessionW(m_workerSessionKey, m_customSymbol, (int)m_renkoFamily, point, digits) <= 0)
+      if(MBP_RenkoOpenSessionW(m_workerSessionKey, m_customSymbol, (int)MBP_RENKO_CLASSIC, point, digits) <= 0)
       {
          DisableWorkerSession("open session failed");
          return false;
@@ -2174,8 +2181,9 @@ bool CRenkoEngine::EnsureWorkerSession()
          DisableWorkerSession("reset session failed");
          return false;
       }
+      double seedBlockSize = (m_lockedBlockSize > 0.0) ? m_lockedBlockSize : m_currentBlockSizePoint;
       if(MBP_RenkoSeedSessionW(m_workerSessionKey, m_customSymbol,
-                              m_anchorPrice, m_isTrendUp ? 1 : 0, m_currentBlockSizePoint,
+                              m_anchorPrice, m_isTrendUp ? 1 : 0, seedBlockSize,
                               m_openOffsetPct, m_reversalShadowPct, m_reversalPct,
                               m_applyOffsetToFirstBar ? 1 : 0, m_offsetDigits,
                               m_resetOpenOnNewDay ? 1 : 0) <= 0)
@@ -2183,7 +2191,7 @@ bool CRenkoEngine::EnsureWorkerSession()
          DisableWorkerSession("seed session failed");
          return false;
       }
-      m_workerSeedBlockSize = m_currentBlockSizePoint;
+      m_workerSeedBlockSize = seedBlockSize;
       m_workerLastReseedMs = GetTickCount();
       m_workerSessionEnabled = true;
       m_workerStallCount = 0;
@@ -2455,6 +2463,7 @@ void CRenkoEngine::SaveState()
    GlobalVariableSet(m_gvPrefix + "_High", m_boxHigh);
    GlobalVariableSet(m_gvPrefix + "_Low", m_boxLow);
    GlobalVariableSet(m_gvPrefix + "_LastClose", m_lastClosePrice);
+   GlobalVariableSet(m_gvPrefix + "_BlockSize", m_lockedBlockSize);
    GlobalVariableSet(m_gvPrefix + "_BrickStart", (double)m_brickStartTime);
    GlobalVariableSet(m_gvPrefix + "_LogicalStart", (double)m_liveLogicalStartTime);
    GlobalVariableSet(m_gvPrefix + "_LiveOpen", m_liveBarOpen);
@@ -2476,6 +2485,14 @@ bool CRenkoEngine::LoadState()
    m_boxHigh = GlobalVariableGet(m_gvPrefix + "_High");
    m_boxLow = GlobalVariableGet(m_gvPrefix + "_Low");
    m_lastClosePrice = GlobalVariableGet(m_gvPrefix + "_LastClose");
+   m_lockedBlockSize = GlobalVariableCheck(m_gvPrefix + "_BlockSize")
+                       ? GlobalVariableGet(m_gvPrefix + "_BlockSize")
+                       : 0.0;
+   if(m_lockedBlockSize <= 0.0)
+   {
+      RefreshBlockSize(TimeCurrent(), true);
+      m_lockedBlockSize = m_currentBlockSizePoint;
+   }
    m_brickStartTime = GlobalVariableCheck(m_gvPrefix + "_BrickStart")
                       ? (datetime)GlobalVariableGet(m_gvPrefix + "_BrickStart")
                       : 0;
@@ -2538,13 +2555,18 @@ void CRenkoEngine::ReconstructStateFromRatePair(const MqlRates &prev, const MqlR
    m_lastClosePrice = last.close;
    m_anchorPrice = last.close;
    m_lastCommittedTime = last.time;
+   m_lockedBlockSize = MathAbs(NormalizePrice(last.close) - NormalizePrice(last.open));
+   if(m_lockedBlockSize <= 0.0)
+   {
+      RefreshBlockSize(last.time, true);
+      m_lockedBlockSize = m_currentBlockSizePoint;
+   }
    
    // Reconstruct trend: if newest close > previous close, trend is UP.
    if(last.close > prev.close) m_isTrendUp = true;
    else if(last.close < prev.close) m_isTrendUp = false;
    else m_isTrendUp = (last.close >= last.open);
 
-   m_lockedBlockSize = 0; 
    m_liveCandidateActive = false;
 }
 
