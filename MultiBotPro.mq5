@@ -2976,7 +2976,9 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
                                           heartbeatState))
                {
                   // Tolerate RELOADING state (template/recompile in progress).
-                  bool reloading = (StringCompare(heartbeatState, "RELOADING", false) == 0);
+                  bool reloading = (StringCompare(heartbeatState, "RELOADING", false) == 0 ||
+                                    StringCompare(heartbeatState, "BOOTING", false) == 0 ||
+                                    StringCompare(heartbeatState, "BUILDING_RENKO", false) == 0);
                   // Only trigger staleness if this heartbeat was published by THIS chart.
                   // If it came from a previous worker (different chart ID), the new worker
                   // hasn't had a chance to publish yet — rely on boot grace instead of
@@ -2984,10 +2986,10 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
                   bool heartbeatFromThisChart = (heartbeatChartId <= 0 || heartbeatChartId == chartId);
                   if(!reloading && heartbeatFromThisChart && heartbeat > 0 && (TimeCurrent() - heartbeat) > 60)
                   {
-                     // Give newly-assigned charts a 180-second boot grace period.
-                     // History builds (especially BTCUSD Renko with DLL) can take 140+s
+                     // Give newly-assigned charts a long boot grace period.
+                     // Synthetic history builds can temporarily starve the heartbeat
                      // before the first heartbeat is published.
-                     bool inBootGrace = (assignedAt > 0 && (TimeCurrent() - assignedAt) < 180);
+                     bool inBootGrace = (assignedAt > 0 && (TimeCurrent() - assignedAt) < 600);
                      if(!inBootGrace)
                      {
                         shouldClose = true;
