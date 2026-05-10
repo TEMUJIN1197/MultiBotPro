@@ -52,17 +52,19 @@ public:
    // Main coordinator cycle (called from OnTimer)
    void ProcessCycle()
    {
-      if(!m_systemState || !m_riskEngine) return;
-
       ulong timerNowMs = GetTickCount();
       bool coordinatorMode = IsParallelCoordinatorMode();
       bool workerMode = IsParallelWorkerMode();
 
+      // Publish heartbeats first. This must stay ahead of worker/chart
+      // maintenance so workers do not pause while the coordinator is doing
+      // heavier management work later in this timer pass.
+      PublishHeartbeats(coordinatorMode);
+
+      if(!m_systemState || !m_riskEngine) return;
+
       // Sync system state with current account
       SyncAccountState();
-
-      // Publish heartbeats
-      PublishHeartbeats(coordinatorMode);
 
       // Consume UI commands
       ConsumeUiCommands();

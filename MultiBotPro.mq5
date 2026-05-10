@@ -4922,8 +4922,20 @@ bool MasterIsUiPriorityWindowActive()
    return false;
 }
 
+void MasterPublishCoordinatorAliveHeartbeatFast()
+{
+   if(!IsParallelCoordinatorMode() || G_RuntimeCoordinatorKey == "")
+      return;
+
+   string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
+   string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
+   GlobalVariableSet(coordAliveGV, (double)GetTickCount64());
+   GlobalVariableSet(coordOwnerGV, (double)ChartID());
+}
+
 void Master_OnTimer()
 {
+   MasterPublishCoordinatorAliveHeartbeatFast();
    G_Coordinator.ProcessCycle();
 }
 
@@ -4935,6 +4947,8 @@ void Master_OnTick()
 {
    if(G_IS_DEINIT || IsStopped()) return;
    if(!G_LicenseValid) return;
+
+   MasterPublishCoordinatorAliveHeartbeatFast();
 
    // --- WORKER COORDINATOR HEARTBEAT GUARD ---
    // If we're a worker and the coordinator hasn't pinged its heartbeat for >10s,
@@ -4951,8 +4965,14 @@ void Master_OnTick()
             static ulong lastWarnMs = 0;
             if(nowMs - lastWarnMs >= 30000)
             {
+               string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
+               long ownerChartId = GlobalVariableCheck(coordOwnerGV) ? (long)GlobalVariableGet(coordOwnerGV) : 0;
+               bool ownerAlive = (ownerChartId > 0 && MBP_IsChartAlive(ownerChartId));
                Print(EmojiWarning(), " Worker pausing: coordinator heartbeat stale (",
-                     (nowMs - lastBeat) / 1000, "s). Halting trades until coordinator returns.");
+                     (nowMs - lastBeat) / 1000, "s). Key=", G_RuntimeCoordinatorKey,
+                     " ownerChart=", ownerChartId,
+                     " ownerAlive=", (ownerAlive ? "true" : "false"),
+                     ". Halting trades until coordinator returns.");
                lastWarnMs = nowMs;
             }
             return;
