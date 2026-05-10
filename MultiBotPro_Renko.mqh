@@ -155,6 +155,7 @@ private:
    datetime ResolveCandidateStartTime(const datetime tickTime) const;
    datetime ResolvePublishedCandidateTime(const datetime logicalStartTime) const;
    datetime ResolveLiveBarTime(const datetime fallbackTickTime) const;
+   int ResolveLivePreviewSpanSeconds() const;
    datetime ResolveCompletedBrickTime(const datetime tickTime) const;
    string PhaseName(const ENUM_MBP_RENKO_PHASE phase) const;
    void SetPhase(const ENUM_MBP_RENKO_PHASE phase);
@@ -1002,35 +1003,55 @@ datetime CRenkoEngine::ResolvePublishedCandidateTime(const datetime logicalStart
 {
    datetime published = (logicalStartTime > 0) ? logicalStartTime : TimeCurrent();
    
-   if(m_lastCommittedTime > 0)
-   {
-      int brickSeconds = PeriodSeconds(PERIOD_M1);
-      if(brickSeconds <= 0)
-         brickSeconds = 60;
-
-      datetime nextDisplaySlot = m_lastCommittedTime + brickSeconds;
-      if(nextDisplaySlot < published)
-         published = nextDisplaySlot;
-
-      if(published <= m_lastCommittedTime)
-         published = m_lastCommittedTime + 1;
-   }
+   if(m_lastCommittedTime > 0 && published <= m_lastCommittedTime)
+      published = m_lastCommittedTime + 1;
 
    return published;
 }
 
 datetime CRenkoEngine::ResolveLiveBarTime(const datetime fallbackTickTime) const
 {
-   if(m_brickStartTime > 0)
-      return m_brickStartTime;
+   datetime liveTime = (fallbackTickTime > 0) ? fallbackTickTime : TimeCurrent();
+   return ResolvePublishedCandidateTime(liveTime);
+}
 
-   datetime logicalTime = m_liveLogicalStartTime;
-   if(logicalTime <= 0)
-      logicalTime = fallbackTickTime;
-   if(logicalTime <= 0)
-      return 0;
+int CRenkoEngine::ResolveLivePreviewSpanSeconds() const
+{
+   int spanSeconds = PeriodSeconds(PERIOD_M1);
+   if(spanSeconds <= 0)
+      spanSeconds = 60;
 
-   return ResolvePublishedCandidateTime(logicalTime);
+   int total = ArraySize(m_ramRateBuffer);
+   if(total >= 2)
+   {
+      int observed = (int)(m_ramRateBuffer[total - 1].time - m_ramRateBuffer[total - 2].time);
+      if(observed > 0)
+         spanSeconds = observed;
+   }
+   else
+   {
+      MqlRates rates[];
+      if(CopyRates(m_customSymbol, PERIOD_M1, 0, 3, rates) >= 2)
+      {
+         datetime newest = rates[0].time;
+         datetime previous = rates[1].time;
+         if(previous > newest)
+         {
+            newest = rates[1].time;
+            previous = rates[0].time;
+         }
+
+         int observed = (int)(newest - previous);
+         if(observed > 0)
+            spanSeconds = observed;
+      }
+   }
+
+   if(spanSeconds < 1)
+      spanSeconds = 1;
+   if(spanSeconds > 60)
+      spanSeconds = 60;
+   return spanSeconds;
 }
 
 datetime CRenkoEngine::ResolveCompletedBrickTime(const datetime tickTime) const
@@ -1423,11 +1444,11 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
    double bid = (sourceBid > 0.0) ? NormalizePrice(sourceBid) : m_lastLivePrice;
    double ask = (sourceAsk > bid) ? NormalizePrice(sourceAsk) : NormalizePrice(bid + point);
    UpdateCustomQuoteFields(bid, ask);
-   PublishLiveQuoteTick(bid, ask, candidateTickMsc);
 
    if(UseLargeDirectLiveMode())
    {
       DeleteLivePreviewOverlay();
+      PublishLiveQuoteTick(bid, ask, candidateTickMsc);
 
       if(!ShouldPublishDirectPreview(forcePublish))
          return;
@@ -1437,7 +1458,10 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
    }
    else if(m_liveStyle == MBP_RENKO_LIVE_SMALL_PHANTOM)
    {
-      // Phantom mode: ONLY visual overlay. NO history deletions.
+      // Phantom mode is RAM/overlay only. Do not write ticks or rates for the
+      // forming brick, because MT5 may synthesize a normal candle from live
+      // custom ticks. Disk history is updated only when ProcessRenkoTick commits
+      // a full clamped brick.
       DrawLivePreviewOverlay();
    }
 }
@@ -1704,10 +1728,11 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
    color barColor = ResolveLivePreviewColor(chartId, brickClose >= brickOpen);
    string bodyName = LivePreviewBodyName();
 
-   // Positioning: Start exactly 1s after the last committed bar.
-   // End is set to +60s to ensure visibility on M1 charts.
-   datetime tStart = (m_lastCommittedTime > 0) ? (m_lastCommittedTime + 1) : TimeCurrent();
-   datetime tEnd = tStart + 60; 
+   datetime liveTickTime = (m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent();
+   datetime tStart = ResolveLiveBarTime(liveTickTime);
+   if(tStart <= 0)
+      tStart = TimeCurrent();
+   datetime tEnd = tStart + ResolveLivePreviewSpanSeconds();
 
    if(ObjectFind(chartId, bodyName) < 0)
    {
