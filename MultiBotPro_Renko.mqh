@@ -195,8 +195,6 @@ private:
    void CloseWorkerSession();
    void DisableWorkerSession(string reason);
    bool WorkerSessionNeedsReseed() const;
-   bool FeedWorkerTick(const MqlTick &tick);
-    int FeedWorkerTicksBatch(const MqlTick &ticks[], const int startIndex, const int count);
    bool PullWorkerSnapshot();
    int DrainWorkerClosedBars();
    void BumpLivePreviewGeneration();
@@ -379,9 +377,6 @@ bool CRenkoEngine::PrepareStartup()
    if(!SyncLiveStateWithCurrentTick())
       PrimeLiveStateFromHistory();
 
-   if(UseWorkerSession())
-      EnsureWorkerSession();
-
    RefreshChartHandle();
    m_isInitialized = true;
    return true;
@@ -418,9 +413,6 @@ void CRenkoEngine::ProcessTick(const MqlTick &tick)
    m_lastSourceAsk = tick.ask;
    RefreshBlockSize(tick.time, false);
 
-   if(UseWorkerSession() && FeedWorkerTick(tick))
-      return;
-
    bool newBrick = ProcessRenkoTick(tick.bid, tick.time, (long)MathMax(1, tick.volume), tick.time_msc);
    if(newBrick)
       FlushRamToDisk(true);
@@ -447,13 +439,6 @@ int CRenkoEngine::ProcessTickBatch(const MqlTick &ticks[], const int startIndex,
       m_lastSourceBid = lastTick.bid;
       m_lastSourceAsk = lastTick.ask;
       RefreshBlockSize(lastTick.time, false);
-   }
-
-   if(UseWorkerSession())
-   {
-      int fed = FeedWorkerTicksBatch(ticks, startIndex, actualCount);
-      if(fed > 0)
-         return fed;
    }
 
    int processed = 0;
@@ -524,7 +509,8 @@ bool CRenkoEngine::BuildHistory()
       SetPhase(MBP_RENKO_PHASE_LOADING_EXISTING_HISTORY);
       if(ReconstructStateFromCustomSymbol() && HasCleanRecentHistory())
       {
-         datetime incrementalFrom = MathMax((datetime)0, m_lastCommittedTime - 7200);
+         datetime sourceCutoff = (m_lastCommittedCloseTime > 0) ? m_lastCommittedCloseTime : m_lastCommittedTime;
+         datetime incrementalFrom = MathMax((datetime)0, sourceCutoff - 7200);
          Print("[Renko] Incremental build: existing history found for ", m_customSymbol,
                ". Replaying from ", incrementalFrom, " (last brick ", m_lastCommittedTime, ")");
          return ConnectHistoryToLive();
@@ -543,6 +529,7 @@ bool CRenkoEngine::BuildHistory()
 
    datetime startTime = ResolveHistoryStart();
    m_lastCommittedTime = startTime - (startTime % 60);
+   m_lastCommittedCloseTime = m_lastCommittedTime;
    m_hardCommittedTime = m_lastCommittedTime;
 
    bool replayOk = true;
@@ -1001,39 +988,26 @@ datetime CRenkoEngine::ResolveCandidateStartTime(const datetime tickTime) const
 
 datetime CRenkoEngine::ResolvePublishedCandidateTime(const datetime logicalStartTime) const
 {
-   datetime published = (logicalStartTime > 0) ? logicalStartTime : TimeCurrent();
-   
-   if(m_lastCommittedTime > 0 && published <= m_lastCommittedTime)
-      published = m_lastCommittedTime + 1;
+   if(m_lastCommittedTime > 0)
+      return m_lastCommittedTime + 1;
 
+   datetime published = (logicalStartTime > 0) ? logicalStartTime : TimeCurrent();
+   if(published <= 0)
+      published = TimeCurrent();
    return published;
 }
 
 datetime CRenkoEngine::ResolveLiveBarTime(const datetime fallbackTickTime) const
 {
+   if(m_lastCommittedTime > 0)
+      return m_lastCommittedTime + 1;
    datetime liveTime = (fallbackTickTime > 0) ? fallbackTickTime : TimeCurrent();
    return ResolvePublishedCandidateTime(liveTime);
 }
 
 int CRenkoEngine::ResolveLivePreviewSpanSeconds() const
 {
-   int spanSeconds = PeriodSeconds(PERIOD_M1);
-   if(spanSeconds <= 0)
-      spanSeconds = 60;
-
-   int total = ArraySize(m_ramRateBuffer);
-   if(total >= 2)
-   {
-      int observed = (int)(m_ramRateBuffer[total - 1].time - m_ramRateBuffer[total - 2].time);
-      if(observed > 0)
-         spanSeconds = observed;
-   }
-
-   if(spanSeconds < 1)
-      spanSeconds = 1;
-   if(spanSeconds > 60)
-      spanSeconds = 60;
-   return spanSeconds;
+   return 1;
 }
 
 datetime CRenkoEngine::ResolveCompletedBrickTime(const datetime tickTime) const
@@ -1237,7 +1211,8 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate();
+               if(!UseLargeDirectLiveMode())
+                  DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
             PushCompletedBrick(completedStart, open, upTarget, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
@@ -1251,7 +1226,8 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate();
+               if(!UseLargeDirectLiveMode())
+                  DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
             PushCompletedBrick(completedStart, open, close, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
@@ -1268,7 +1244,8 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate();
+               if(!UseLargeDirectLiveMode())
+                  DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
             PushCompletedBrick(completedStart, open, downTarget, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
@@ -1282,7 +1259,8 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate();
+               if(!UseLargeDirectLiveMode())
+                  DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
             PushCompletedBrick(completedStart, open, close, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
@@ -1366,8 +1344,16 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
 
    m_ramRateBuffer[idx].time = displayTime;
    m_ramRateBuffer[idx].open = brickOpen;
-   m_ramRateBuffer[idx].high = NormalizePrice(bodyHigh);
-   m_ramRateBuffer[idx].low = NormalizePrice(bodyLow);
+   if(m_showWicks)
+   {
+      m_ramRateBuffer[idx].high = NormalizePrice(MathMax(MathMax(high, low), bodyHigh));
+      m_ramRateBuffer[idx].low = NormalizePrice(MathMin(MathMin(high, low), bodyLow));
+   }
+   else
+   {
+      m_ramRateBuffer[idx].high = NormalizePrice(bodyHigh);
+      m_ramRateBuffer[idx].low = NormalizePrice(bodyLow);
+   }
    m_ramRateBuffer[idx].close = brickClose;
    m_ramRateBuffer[idx].tick_volume = MathMax(1, volume);
    m_ramRateBuffer[idx].spread = 0;
@@ -1797,8 +1783,16 @@ void CRenkoEngine::FlushRamToDisk(bool force)
    {
       double bodyHigh = MathMax(m_ramRateBuffer[i].open, m_ramRateBuffer[i].close);
       double bodyLow = MathMin(m_ramRateBuffer[i].open, m_ramRateBuffer[i].close);
-      m_ramRateBuffer[i].high = NormalizePrice(bodyHigh);
-      m_ramRateBuffer[i].low = NormalizePrice(bodyLow);
+      if(m_showWicks)
+      {
+         m_ramRateBuffer[i].high = NormalizePrice(MathMax(m_ramRateBuffer[i].high, bodyHigh));
+         m_ramRateBuffer[i].low = NormalizePrice(MathMin(m_ramRateBuffer[i].low, bodyLow));
+      }
+      else
+      {
+         m_ramRateBuffer[i].high = NormalizePrice(bodyHigh);
+         m_ramRateBuffer[i].low = NormalizePrice(bodyLow);
+      }
    }
    ResetLastError();
    m_lastFlushTryMs = GetTickCount();
@@ -1833,6 +1827,7 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
    m_isReplayingHistory = true;
    MqlRates src[];
    CopyRates(m_symbol, PERIOD_M1, 0, 10, src);
+   datetime sourceCommittedCutoff = (m_lastCommittedCloseTime > 0) ? m_lastCommittedCloseTime : m_lastCommittedTime;
 
    datetime toTime = (m_historyReplayToTime > 0) ? m_historyReplayToTime : TimeCurrent();
    if(toTime < fromTime)
@@ -1870,19 +1865,10 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
          ArrayResize(times, total);
 
          int validCount = 0;
-         datetime lastBarTimeTmp = (total > 0) ? src[0].time : 0;
          for(int i = 0; i < total; i++)
          {
-            if(skipCommitted && src[i].time <= m_lastCommittedTime)
+            if(skipCommitted && src[i].time <= sourceCommittedCutoff)
                continue;
-
-            if(src[i].time - lastBarTimeTmp > 14400)
-            {
-               datetime snapped = src[i].time - (src[i].time % 60);
-               if(snapped > m_lastCommittedTime)
-                  m_lastCommittedTime = snapped - 60;
-            }
-            lastBarTimeTmp = src[i].time;
 
             long baseTimeMsc = (long)src[i].time * 1000;
             opens[validCount] = src[i].open;
@@ -1972,19 +1958,10 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
       }
    }
 
-   datetime lastBarTime = (total > 0) ? src[0].time : 0;
    for(int i = 0; i < total; i++)
    {
-      if(skipCommitted && src[i].time <= m_lastCommittedTime)
+      if(skipCommitted && src[i].time <= sourceCommittedCutoff)
          continue;
-
-      if(src[i].time - lastBarTime > 14400)
-      {
-         datetime snapped = src[i].time - (src[i].time % 60);
-         if(snapped > m_lastCommittedTime)
-            m_lastCommittedTime = snapped - 60;
-      }
-      lastBarTime = src[i].time;
 
       long volPart = MathMax(1, src[i].tick_volume / 4);
       long baseTimeMsc = (long)src[i].time * 1000;
@@ -2015,6 +1992,7 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
 bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommitted)
 {
    m_isReplayingHistory = true;
+   datetime sourceCommittedCutoff = (m_lastCommittedCloseTime > 0) ? m_lastCommittedCloseTime : m_lastCommittedTime;
    MqlTick ticks[];
    int total = CopyTicksRange(m_symbol, ticks, COPY_TICKS_ALL, (ulong)fromTime * 1000, (ulong)TimeCurrent() * 1000);
    if(total <= 0)
@@ -2053,21 +2031,12 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
          ArrayResize(times, total);
          
          int validCount = 0;
-         datetime lastTickTimeTmp = 0;
          for(int i = 0; i < total; i++)
          {
             if(ticks[i].bid <= 0.0)
                continue;
-            if(skipCommitted && ticks[i].time <= m_lastCommittedTime)
+            if(skipCommitted && ticks[i].time <= sourceCommittedCutoff)
                continue;
-
-            if(lastTickTimeTmp > 0 && ticks[i].time - lastTickTimeTmp > 14400)
-            {
-               datetime snapped = ticks[i].time - (ticks[i].time % 60);
-               if(snapped > m_lastCommittedTime)
-                  m_lastCommittedTime = snapped - 60;
-            }
-            lastTickTimeTmp = ticks[i].time;
 
             long tickMsc = (ticks[i].time_msc > 0) ? ticks[i].time_msc : ((long)ticks[i].time * 1000);
             if(tickMsc <= 0)
@@ -2109,7 +2078,7 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
                if(totalDrainedT == 0)
                {
                   Print("[Renko] DLL tick history produced 0 new bricks for ", m_customSymbol,
-                        "; session remains active for live ticks.");
+                        "; keeping native live state.");
                   m_isReplayingHistory = false;
                   return true;
                }
@@ -2130,28 +2099,19 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
          else if(skipCommitted)
          {
             Print("[Renko] Tick history overlap contains no new ticks for ", m_customSymbol,
-                  "; keeping DLL session active.");
+                  "; continuing with native live processing.");
             m_isReplayingHistory = false;
             return true;
          }
       }
    }
 
-   datetime lastTickTime = 0;
    for(int i = 0; i < total; i++)
    {
       if(ticks[i].bid <= 0.0)
          continue;
-      if(skipCommitted && ticks[i].time <= m_lastCommittedTime)
+      if(skipCommitted && ticks[i].time <= sourceCommittedCutoff)
          continue;
-
-      if(lastTickTime > 0 && ticks[i].time - lastTickTime > 14400)
-      {
-         datetime snapped = ticks[i].time - (ticks[i].time % 60);
-         if(snapped > m_lastCommittedTime)
-            m_lastCommittedTime = snapped - 60;
-      }
-      lastTickTime = ticks[i].time;
 
       ProcessRenkoTick(ticks[i].bid, ticks[i].time, 1, ticks[i].time_msc);
    }
@@ -2164,28 +2124,15 @@ bool CRenkoEngine::ConnectHistoryToLive()
 {
    SetPhase(MBP_RENKO_PHASE_SYNCING_TO_LIVE);
    m_lastPublishedLiveBarTime = 0;
-   datetime replayFrom = (m_lastCommittedTime > 0) ? MathMax((datetime)0, m_lastCommittedTime - 7200) : (TimeCurrent() - 172800);
+   datetime sourceCutoff = (m_lastCommittedCloseTime > 0) ? m_lastCommittedCloseTime : m_lastCommittedTime;
+   datetime replayFrom = (sourceCutoff > 0) ? MathMax((datetime)0, sourceCutoff - 7200) : (TimeCurrent() - 172800);
 
    if(m_lastCommittedTime > 0)
    {
-      MqlRates seedRates[];
-      int copied = CopyRates(m_customSymbol, PERIOD_M1, 0, 5000, seedRates);
-      int seedIndex = -1;
-      for(int i = 1; i < copied; i++)
-      {
-         if(seedRates[i].time < replayFrom)
-            seedIndex = i;
-      }
-
-      if(seedIndex >= 1)
-      {
-         ReconstructStateFromRatePair(seedRates[seedIndex - 1], seedRates[seedIndex]);
-         Print("[Renko] Incremental seed retained at ", m_lastCommittedTime,
-               "; rebuilding overlap from ", replayFrom);
-      }
-
       CustomRatesDelete(m_customSymbol, m_lastCommittedTime + 1, LONG_MAX);
       CustomTicksDelete(m_customSymbol, ((long)m_lastCommittedTime + 1) * 1000, LONG_MAX);
+      Print("[Renko] Incremental seed retained at ", m_lastCommittedTime,
+            "; replaying live catch-up from ", replayFrom);
    }
 
    bool replayOk = (m_histDataType == DATA_M1)
@@ -2413,7 +2360,8 @@ int CRenkoEngine::DrainWorkerClosedBars()
    if(count <= 0)
       return 0;
 
-   DeletePublishedLivePreviewRate();
+   if(!UseLargeDirectLiveMode())
+      DeletePublishedLivePreviewRate();
    DeleteLivePreviewOverlay();
    BumpLivePreviewGeneration();
 
@@ -2430,130 +2378,6 @@ int CRenkoEngine::DrainWorkerClosedBars()
    }
 
    return count;
-}
-
-bool CRenkoEngine::FeedWorkerTick(const MqlTick &tick)
-{
-   MqlTick batch[];
-   ArrayResize(batch, 1);
-   batch[0] = tick;
-   return (FeedWorkerTicksBatch(batch, 0, 1) > 0);
-}
-
-int CRenkoEngine::FeedWorkerTicksBatch(const MqlTick &ticks[], const int startIndex, const int count)
-{
-   if(!EnsureWorkerSession() || count <= 0 || startIndex < 0)
-      return 0;
-
-   int available = ArraySize(ticks) - startIndex;
-   if(available <= 0)
-      return 0;
-
-   int actualCount = MathMin(count, available);
-   if(actualCount <= 0)
-      return 0;
-
-   double prices[];
-   long times[];
-   int valid = 0;
-   double lastMirrorBid = 0.0;
-   double lastMirrorAsk = 0.0;
-   long lastMirrorTimeMsc = 0;
-   ArrayResize(prices, actualCount);
-   ArrayResize(times, actualCount);
-   for(int i = 0; i < actualCount; i++)
-   {
-      const MqlTick tick = ticks[startIndex + i];
-      if(tick.bid <= 0.0)
-         continue;
-
-      long tickMsc = (tick.time_msc > 0) ? tick.time_msc : ((long)tick.time * 1000);
-      if(tickMsc <= 0)
-         tickMsc = (long)TimeCurrent() * 1000;
-
-      prices[valid] = tick.bid;
-      times[valid] = tickMsc;
-      lastMirrorBid = tick.bid;
-      lastMirrorAsk = tick.ask;
-      lastMirrorTimeMsc = tickMsc;
-      valid++;
-   }
-
-   if(valid <= 0)
-      return actualCount;
-
-   ArrayResize(prices, valid);
-   ArrayResize(times, valid);
-
-   if(MBP_RenkoFeedTicksW(m_workerSessionKey, m_customSymbol, prices, times, valid) <= 0)
-   {
-      DisableWorkerSession("feed tick batch failed");
-      return 0;
-   }
-
-   if(UseLargeDirectLiveMode() && lastMirrorBid > 0.0)
-   {
-      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
-      if(point <= 0.0)
-         point = _Point;
-      double liveAsk = (lastMirrorAsk > lastMirrorBid) ? lastMirrorAsk : (lastMirrorBid + point);
-      UpdateCustomQuoteFields(lastMirrorBid, liveAsk);
-      PublishLiveQuoteTick(lastMirrorBid, liveAsk, lastMirrorTimeMsc);
-   }
-
-   int closed = 0;
-   long previousSnapshotTickMsc = m_workerLastSnapshotTickMsc;
-   bool freshSnapshot = false;
-   for(int attempt = 0; attempt < 2; attempt++)
-   {
-      closed += DrainWorkerClosedBars();
-      if(!PullWorkerSnapshot())
-      {
-         DisableWorkerSession("snapshot read failed");
-         return 0;
-      }
-
-      if(m_workerLastSnapshotTickMsc >= times[valid - 1] ||
-         m_workerLastSnapshotTickMsc > previousSnapshotTickMsc)
-      {
-         freshSnapshot = true;
-         break;
-      }
-   }
-
-   if(!freshSnapshot)
-   {
-      m_workerStallCount++;
-      if(m_workerStallCount >= 10)
-      {
-         DisableWorkerSession("snapshot stalled");
-         return 0;
-      }
-   }
-   else
-   {
-      m_workerStallCount = 0;
-   }
-
-   if(closed > 0)
-      FlushRamToDisk(true);
-
-   if(m_liveCandidateActive)
-   {
-      double liveBid = (m_lastSourceBid > 0.0) ? m_lastSourceBid : ((m_lastLivePrice > 0.0) ? m_lastLivePrice : m_anchorPrice);
-      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
-      if(point <= 0.0)
-         point = _Point;
-      double liveAsk = (m_lastSourceAsk > liveBid) ? m_lastSourceAsk : (liveBid + point);
-      UpdateLiveBlock(m_liveCandidateClose, m_livePreviewEndTime, m_workerLastSnapshotTickMsc, liveBid, liveAsk, (closed > 0));
-   }
-   else
-   {
-      DeletePublishedLivePreviewRate();
-      DeleteLivePreviewOverlay();
-   }
-
-   return actualCount;
 }
 
 void CRenkoEngine::SaveState()
@@ -2649,6 +2473,8 @@ bool CRenkoEngine::ReconstructStateFromCustomSymbol()
 
    // Element with index 1 is newer than index 0 in MT5 CopyRates
    ReconstructStateFromRatePair(rates[0], rates[1]);
+   if(GlobalVariableCheck(m_gvPrefix + "_LastCloseTime"))
+      m_lastCommittedCloseTime = (datetime)GlobalVariableGet(m_gvPrefix + "_LastCloseTime");
    return true;
 }
 
@@ -2657,6 +2483,7 @@ void CRenkoEngine::ReconstructStateFromRatePair(const MqlRates &prev, const MqlR
    m_lastClosePrice = last.close;
    m_anchorPrice = last.close;
    m_lastCommittedTime = last.time;
+   m_lastCommittedCloseTime = last.time;
    m_lockedBlockSize = MathAbs(NormalizePrice(last.close) - NormalizePrice(last.open));
    if(m_lockedBlockSize <= 0.0)
    {
