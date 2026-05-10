@@ -2904,6 +2904,46 @@ bool MasterSaveWorkerTemplate(const bool forceSave = false)
    return true;
 }
 
+bool MasterApplyWorkerTemplateWithRecovery(const long chartId,
+                                           const string baseSymbol,
+                                           string &templateName)
+{
+   if(chartId <= 0 || chartId == ChartID())
+      return false;
+
+   if(templateName == "")
+      templateName = MBP_WorkerTemplateName();
+
+   ResetLastError();
+   if(ChartApplyTemplate(chartId, templateName))
+      return true;
+
+   int firstErr = _LastError;
+   Print(EmojiWarning(), " Failed to apply worker template to ", baseSymbol,
+         " on chart ", chartId, " (error=", firstErr,
+         "). Rebuilding template and retrying.");
+
+   if(!MasterSaveWorkerTemplate(true))
+   {
+      Print(EmojiWarning(), " Worker template rebuild failed; cannot launch ", baseSymbol,
+            " on chart ", chartId, ".");
+      return false;
+   }
+
+   templateName = MBP_WorkerTemplateName();
+   ResetLastError();
+   if(ChartApplyTemplate(chartId, templateName))
+   {
+      Print(EmojiBrain(), " Worker template reapplied after rebuild for ", baseSymbol,
+            " on chart ", chartId, ".");
+      return true;
+   }
+
+   Print(EmojiWarning(), " Failed to apply rebuilt worker template to ", baseSymbol,
+         " on chart ", chartId, " (error=", _LastError, ").");
+   return false;
+}
+
 void MasterPublishWorkerHeartbeat()
 {
    if(!IsParallelWorkerMode())
@@ -3204,6 +3244,19 @@ void MasterEnsureRuntimeWorkers()
          {
             continue;
          }
+
+         // The template can be deleted/corrupted after the coordinator cached its
+         // signature. Force a fresh template immediately before opening a new
+         // worker chart so the following ChartApplyTemplate has a valid payload.
+         if(!MasterSaveWorkerTemplate(true))
+         {
+            Print(EmojiWarning(), " Worker launch skipped for ", baseSymbol,
+                  " because the worker template could not be rebuilt.");
+            G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+            continue;
+         }
+         templateName = MBP_WorkerTemplateName();
+
          targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
          newlyAssigned = true;
          templateRequired = true;
@@ -3275,13 +3328,14 @@ void MasterEnsureRuntimeWorkers()
       if(templateRequired)
       {
          MBP_WriteWorkerLaunchMarker(targetChartId);
-         if(!ChartApplyTemplate(targetChartId, templateName))
+         if(!MasterApplyWorkerTemplateWithRecovery(targetChartId, baseSymbol, templateName))
          {
-            Print(EmojiWarning(), " Failed to apply worker template to ", baseSymbol, " on chart ", targetChartId);
             MBP_ClearWorkerLaunchMarker(targetChartId);
             string assignmentFile = MBP_WorkerAssignmentFile(targetChartId);
             if(FileIsExist(assignmentFile, FILE_COMMON))
                FileDelete(assignmentFile, FILE_COMMON);
+            if(newlyAssigned && MBP_IsChartAlive(targetChartId))
+               ChartClose(targetChartId);
             continue;
          }
       }
