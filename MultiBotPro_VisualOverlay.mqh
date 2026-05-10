@@ -1181,10 +1181,14 @@ void RefreshIndicatorOverlayForChart(const long chartID,
 
 void RefreshIndicatorOverlay(const bool allowFullRedraw)
 {
-   int focusIndex = ResolveDashboardHostFocusSymbolIndex(ChartSymbol(0));
+   string chartSymbol = ChartSymbol(0);
+   int focusIndex = ResolveDashboardHostFocusSymbolIndex(chartSymbol);
    string focusSymbol = "";
    if(focusIndex >= 0 && focusIndex < ArraySize(SymbolData))
       focusSymbol = SymbolData[focusIndex].symbol;
+
+   if(InpOverlayUseChartSymbol && IsAnalysisSymbol(chartSymbol))
+      focusSymbol = chartSymbol;
 
    RefreshIndicatorOverlayForChart(0, focusSymbol, PERIOD_CURRENT, focusIndex, allowFullRedraw);
 }

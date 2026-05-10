@@ -1002,8 +1002,19 @@ datetime CRenkoEngine::ResolvePublishedCandidateTime(const datetime logicalStart
 {
    datetime published = (logicalStartTime > 0) ? logicalStartTime : TimeCurrent();
    
-   if(m_lastCommittedTime > 0 && published <= m_lastCommittedTime)
-      published = m_lastCommittedTime + 1;
+   if(m_lastCommittedTime > 0)
+   {
+      int brickSeconds = PeriodSeconds(PERIOD_M1);
+      if(brickSeconds <= 0)
+         brickSeconds = 60;
+
+      datetime nextDisplaySlot = m_lastCommittedTime + brickSeconds;
+      if(nextDisplaySlot < published)
+         published = nextDisplaySlot;
+
+      if(published <= m_lastCommittedTime)
+         published = m_lastCommittedTime + 1;
+   }
 
    return published;
 }
@@ -1024,11 +1035,11 @@ datetime CRenkoEngine::ResolveLiveBarTime(const datetime fallbackTickTime) const
 
 datetime CRenkoEngine::ResolveCompletedBrickTime(const datetime tickTime) const
 {
-   // Bar time = the timestamp of the last tick that completed this brick.
-   // This is consistent with the DLL path (which returns the completing-tick
-   // timestamp) and ensures history and live bars carry identical semantics.
+   // Keep the real completion event time here. PushCompletedBrick converts it
+   // to the clamped Renko display clock while preserving the event time for
+   // custom ticks, Market Watch freshness, and trading logic.
    datetime completing = (tickTime > 0) ? tickTime : TimeCurrent();
-   return ResolvePublishedCandidateTime(completing);
+   return completing;
 }
 
 string CRenkoEngine::PhaseName(const ENUM_MBP_RENKO_PHASE phase) const
@@ -1322,8 +1333,13 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
    ENUM_MBP_RENKO_PHASE priorPhase = m_phase;
    SetPhase(MBP_RENKO_PHASE_COMMITTING_BRICK);
 
-   if(startTime <= m_lastCommittedTime)
-      startTime = m_lastCommittedTime + 1;
+   datetime eventTime = startTime;
+   if(eventTimeMsc > 0)
+      eventTime = (datetime)(eventTimeMsc / 1000);
+   if(eventTime <= 0)
+      eventTime = TimeCurrent();
+
+   datetime displayTime = ResolvePublishedCandidateTime(eventTime);
 
    int idx = ArraySize(m_ramRateBuffer);
    // Optimization: Increase reserve to handle history/spikes efficiently
@@ -1345,7 +1361,7 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
       return;
    }
 
-   m_ramRateBuffer[idx].time = startTime;
+   m_ramRateBuffer[idx].time = displayTime;
    m_ramRateBuffer[idx].open = brickOpen;
    m_ramRateBuffer[idx].high = NormalizePrice(bodyHigh);
    m_ramRateBuffer[idx].low = NormalizePrice(bodyLow);
@@ -1355,14 +1371,18 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
    m_ramRateBuffer[idx].real_volume = 0;
 
    m_lastClosePrice = brickClose;
-   m_lastCommittedTime = startTime;
-   m_lastCommittedCloseTime = startTime;
+   m_lastCommittedTime = displayTime;
+   m_lastCommittedCloseTime = eventTime;
    m_lastLivePrice = brickClose;
    if(!m_isReplayingHistory)
       BumpLivePreviewGeneration();
 
+   long quoteEventMsc = eventTimeMsc;
+   if(quoteEventMsc <= 0 && eventTime > 0)
+      quoteEventMsc = (long)eventTime * 1000;
+
    if(!m_isReplayingHistory)
-      PublishCommittedQuote(brickClose, eventTimeMsc);
+      PublishCommittedQuote(brickClose, quoteEventMsc);
 
    m_phase = priorPhase;
 }
@@ -1396,19 +1416,18 @@ void CRenkoEngine::UpdateLiveBlock(double price, datetime tickTime, long tickTim
    long candidateTickMsc = tickTimeMsc;
    if(candidateTickMsc <= 0 && tickTime > 0)
       candidateTickMsc = (long)tickTime * 1000;
-   if(candidateTickMsc > 0 && candidateTickMsc >= m_lastLiveTickMsc)
-      m_lastLiveTickMsc = candidateTickMsc;
+
+   double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      point = _Point;
+   double bid = (sourceBid > 0.0) ? NormalizePrice(sourceBid) : m_lastLivePrice;
+   double ask = (sourceAsk > bid) ? NormalizePrice(sourceAsk) : NormalizePrice(bid + point);
+   UpdateCustomQuoteFields(bid, ask);
+   PublishLiveQuoteTick(bid, ask, candidateTickMsc);
 
    if(UseLargeDirectLiveMode())
    {
       DeleteLivePreviewOverlay();
-      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
-      if(point <= 0.0)
-         point = _Point;
-      double bid = (sourceBid > 0.0) ? NormalizePrice(sourceBid) : m_lastLivePrice;
-      double ask = (sourceAsk > bid) ? NormalizePrice(sourceAsk) : NormalizePrice(bid + point);
-      UpdateCustomQuoteFields(bid, ask);
-      PublishLiveQuoteTick(bid, ask, candidateTickMsc);
 
       if(!ShouldPublishDirectPreview(forcePublish))
          return;
@@ -1566,6 +1585,7 @@ void CRenkoEngine::PublishLiveQuoteTick(const double bid, const double ask, long
 
    m_tickMirrorFailureCount = 0;
    m_lastLiveQuoteTickMsc = liveTickMsc;
+   m_lastLiveTickMsc = liveTickMsc;
 }
 
 void CRenkoEngine::PublishCommittedQuote(const double closePrice, const long eventTimeMsc)
@@ -1603,6 +1623,7 @@ void CRenkoEngine::PublishCommittedQuote(const double closePrice, const long eve
    }
 
    m_lastCommittedQuoteTickMsc = requestedTickMsc;
+   m_lastLiveTickMsc = MathMax(m_lastLiveTickMsc, requestedTickMsc);
 }
 
 bool CRenkoEngine::UseSmallPhantomLiveMode() const
@@ -2390,10 +2411,6 @@ int CRenkoEngine::DrainWorkerClosedBars()
    for(int i = 0; i < count; i++)
    {
       datetime startTime = (datetime)closedLongs[i * 3 + 0];
-      // Use the actual tick-based timestamp emitted by the engine; only
-      // synthesise +1 when needed to enforce monotonicity.
-      if(m_lastCommittedTime > 0 && startTime <= m_lastCommittedTime)
-         startTime = m_lastCommittedTime + 1;
 
       double brickOpen = NormalizePrice(closedDoubles[i * 4 + 0]);
       double brickClose = NormalizePrice(closedDoubles[i * 4 + 3]);

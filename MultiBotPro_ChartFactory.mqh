@@ -417,11 +417,15 @@ private:
       int symbolIndex = ResolveVisualSymbolIndex();
       if(symbolIndex >= 0 && symbolIndex < ArraySize(SymbolData) && SymbolData[symbolIndex].active)
       {
+         ENUM_TIMEFRAMES visualPeriod = (ENUM_TIMEFRAMES)ChartPeriod(m_chartID);
+         if(visualPeriod == PERIOD_CURRENT)
+            visualPeriod = PERIOD_M1;
+
          if(ShowBoxLines)
-            UpdateBoxLevelsForChart(symbolIndex, m_chartID, SymbolData[symbolIndex].symbol, PERIOD_M1);
+            UpdateBoxLevelsForChart(symbolIndex, m_chartID, m_customSymbol, visualPeriod);
          else
             DeleteBoxObjectsForChart(m_chartID);
-         RefreshIndicatorOverlayForChart(m_chartID, SymbolData[symbolIndex].symbol, PERIOD_M1, symbolIndex, allowFullRedraw);
+         RefreshIndicatorOverlayForChart(m_chartID, m_customSymbol, visualPeriod, symbolIndex, allowFullRedraw);
       }
       else
       {
