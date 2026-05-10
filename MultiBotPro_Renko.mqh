@@ -1729,10 +1729,18 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
    string bodyName = LivePreviewBodyName();
 
    datetime liveTickTime = (m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent();
-   datetime tStart = ResolveLiveBarTime(liveTickTime);
-   if(tStart <= 0)
-      tStart = TimeCurrent();
-   datetime tEnd = tStart + ResolveLivePreviewSpanSeconds();
+   datetime tCenter = ResolveLiveBarTime(liveTickTime);
+   if(tCenter <= 0)
+      tCenter = TimeCurrent();
+   int spanSeconds = ResolveLivePreviewSpanSeconds();
+   int halfSpan = MathMax(1, spanSeconds / 2);
+   datetime tStart = tCenter - halfSpan;
+   datetime tEnd = tCenter + MathMax(1, spanSeconds - halfSpan);
+   if(m_lastCommittedTime > 0 && tStart <= m_lastCommittedTime)
+   {
+      tStart = m_lastCommittedTime + 1;
+      tEnd = tStart + spanSeconds;
+   }
 
    if(ObjectFind(chartId, bodyName) < 0)
    {
