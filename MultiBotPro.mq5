@@ -1484,6 +1484,77 @@ bool MBP_IsChartAlive(const long chartId)
    return (chartSymbol != "");
 }
 
+string MBP_CoordAliveGVName(const string coordinatorKey)
+{
+   return "MBP_COORD_ALIVE_" + coordinatorKey;
+}
+
+string MBP_CoordOwnerGVName(const string coordinatorKey)
+{
+   return "MBP_COORD_OWNER_" + coordinatorKey;
+}
+
+string MBP_CoordOwnerHighGVName(const string coordinatorKey)
+{
+   return "MBP_COORD_OWNER_HI_" + coordinatorKey;
+}
+
+string MBP_CoordOwnerLowGVName(const string coordinatorKey)
+{
+   return "MBP_COORD_OWNER_LO_" + coordinatorKey;
+}
+
+void MBP_WriteCoordinatorAliveHeartbeat(const string coordinatorKey, const long chartId)
+{
+   if(coordinatorKey == "" || chartId <= 0)
+      return;
+
+   GlobalVariableSet(MBP_CoordAliveGVName(coordinatorKey), (double)GetTickCount64());
+
+   // Keep the legacy owner GV for diagnostics, but store an exact split id too:
+   // MT5 chart ids exceed double's exact integer range and otherwise round-trip
+   // to a different id, making ChartSymbol(ownerChart) fail spuriously.
+   GlobalVariableSet(MBP_CoordOwnerGVName(coordinatorKey), (double)chartId);
+   long high = chartId / 1000000;
+   long low = chartId - (high * 1000000);
+   GlobalVariableSet(MBP_CoordOwnerHighGVName(coordinatorKey), (double)high);
+   GlobalVariableSet(MBP_CoordOwnerLowGVName(coordinatorKey), (double)low);
+}
+
+long MBP_ReadCoordinatorOwnerChartId(const string coordinatorKey)
+{
+   if(coordinatorKey == "")
+      return 0;
+
+   string highName = MBP_CoordOwnerHighGVName(coordinatorKey);
+   string lowName = MBP_CoordOwnerLowGVName(coordinatorKey);
+   if(GlobalVariableCheck(highName) && GlobalVariableCheck(lowName))
+   {
+      long high = (long)GlobalVariableGet(highName);
+      long low = (long)GlobalVariableGet(lowName);
+      if(high > 0 || low > 0)
+         return (high * 1000000) + low;
+   }
+
+   string legacyName = MBP_CoordOwnerGVName(coordinatorKey);
+   return GlobalVariableCheck(legacyName) ? (long)GlobalVariableGet(legacyName) : 0;
+}
+
+void MBP_DeleteCoordinatorAliveHeartbeat(const string coordinatorKey)
+{
+   if(coordinatorKey == "")
+      return;
+
+   string names[4];
+   names[0] = MBP_CoordAliveGVName(coordinatorKey);
+   names[1] = MBP_CoordOwnerGVName(coordinatorKey);
+   names[2] = MBP_CoordOwnerHighGVName(coordinatorKey);
+   names[3] = MBP_CoordOwnerLowGVName(coordinatorKey);
+   for(int i = 0; i < 4; i++)
+      if(GlobalVariableCheck(names[i]))
+         GlobalVariableDel(names[i]);
+}
+
 bool MBP_WaitForChartTargetReady(const long chartId,
                                  const string expectedSymbol,
                                  const uint timeoutMs = 4000)
@@ -2563,8 +2634,7 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
       // the chart ID so a chart re-initialising (REASON_PARAMETERS, CHARTCHANGE,
       // RECOMPILE, TEMPLATE) can re-claim its own role instead of being blocked
       // by its own pre-deinit heartbeat.
-      string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
-      string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
+      string coordAliveGV = MBP_CoordAliveGVName(G_RuntimeCoordinatorKey);
       long myChartId = ChartID();
 
       // CRITICAL: MT5 chart IDs (e.g. 134221287195433199) exceed 2^53 — they cannot
@@ -2572,21 +2642,18 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
       // we must apply the same lossy round-trip to both sides; otherwise the same
       // chart's pre-deinit GV blocks its own re-claim because the stored long has
       // been rounded to the nearest multiple of 16 or 32.
-      long myChartIdAsStored = (long)(double)myChartId;
-
       if(GlobalVariableCheck(coordAliveGV))
       {
          ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
          ulong nowMs    = GetTickCount64();
          if(lastBeat > 0 && nowMs >= lastBeat && (nowMs - lastBeat) < 5000)
          {
-            long ownerChartId = GlobalVariableCheck(coordOwnerGV) ?
-                                (long)GlobalVariableGet(coordOwnerGV) : 0;
-            if(ownerChartId != 0 && ownerChartId != myChartIdAsStored)
+            long ownerChartId = MBP_ReadCoordinatorOwnerChartId(G_RuntimeCoordinatorKey);
+            if(ownerChartId != 0 && ownerChartId != myChartId)
             {
                Print(EmojiWarning(), " Another coordinator is already running for key '",
                      G_RuntimeCoordinatorKey, "' on chart ", ownerChartId,
-                     " (mine=", myChartIdAsStored, ", heartbeat ", (nowMs - lastBeat),
+                     " (mine=", myChartId, ", heartbeat ", (nowMs - lastBeat),
                      "ms ago). This chart will run as LEGACY (no worker spawning).");
                return MBP_RUNTIME_LEGACY;
             }
@@ -2595,8 +2662,7 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart()
       }
 
       // Stamp our claim — both timestamp and owner — so siblings see us and step down.
-      GlobalVariableSet(coordAliveGV, (double)GetTickCount64());
-      GlobalVariableSet(coordOwnerGV, (double)myChartId);
+      MBP_WriteCoordinatorAliveHeartbeat(G_RuntimeCoordinatorKey, myChartId);
       return MBP_RUNTIME_COORDINATOR;
    }
 
@@ -4880,12 +4946,7 @@ void Master_OnDeinit(const int reason)
 
          // Drop the coordinator-alive heartbeat AND owner stamp so a sibling chart
          // can reclaim the role immediately rather than waiting 5 seconds for staleness.
-         string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
-         string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
-         if(GlobalVariableCheck(coordAliveGV))
-            GlobalVariableDel(coordAliveGV);
-         if(GlobalVariableCheck(coordOwnerGV))
-            GlobalVariableDel(coordOwnerGV);
+         MBP_DeleteCoordinatorAliveHeartbeat(G_RuntimeCoordinatorKey);
       }
    }
 
@@ -4927,10 +4988,76 @@ void MasterPublishCoordinatorAliveHeartbeatFast()
    if(!IsParallelCoordinatorMode() || G_RuntimeCoordinatorKey == "")
       return;
 
-   string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
-   string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
-   GlobalVariableSet(coordAliveGV, (double)GetTickCount64());
-   GlobalVariableSet(coordOwnerGV, (double)ChartID());
+   MBP_WriteCoordinatorAliveHeartbeat(G_RuntimeCoordinatorKey, ChartID());
+}
+
+bool MBP_WorkerShouldStopForMissingCoordinator(const string context)
+{
+   if(!IsParallelWorkerMode() || G_RuntimeCoordinatorKey == "")
+      return false;
+
+   static ulong missingStartedMs = 0;
+   static ulong lastWarnMs = 0;
+   string coordAliveGV = MBP_CoordAliveGVName(G_RuntimeCoordinatorKey);
+   ulong nowMs = GetTickCount64();
+
+   if(!GlobalVariableCheck(coordAliveGV))
+   {
+      if(missingStartedMs == 0)
+         missingStartedMs = nowMs;
+      if((nowMs - missingStartedMs) <= 15000)
+         return false;
+
+      if(nowMs - lastWarnMs >= 30000)
+      {
+         Print(EmojiWarning(), " Worker removing itself: coordinator heartbeat missing for key=",
+               G_RuntimeCoordinatorKey, " context=", context, ".");
+         lastWarnMs = nowMs;
+      }
+      ExpertRemove();
+      ChartClose(ChartID());
+      return true;
+   }
+
+   missingStartedMs = 0;
+   ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
+   if(lastBeat <= 0 || nowMs < lastBeat)
+      return false;
+
+   ulong staleMs = nowMs - lastBeat;
+   if(staleMs <= 10000)
+      return false;
+
+   long ownerChartId = MBP_ReadCoordinatorOwnerChartId(G_RuntimeCoordinatorKey);
+   bool ownerAlive = (ownerChartId > 0 && MBP_IsChartAlive(ownerChartId));
+   if(ownerAlive && staleMs <= 60000)
+      return false;
+
+   if(!ownerAlive && staleMs > 15000)
+   {
+      if(nowMs - lastWarnMs >= 30000)
+      {
+         Print(EmojiWarning(), " Worker removing itself: coordinator owner is gone (",
+               staleMs / 1000, "s stale). Key=", G_RuntimeCoordinatorKey,
+               " ownerChart=", ownerChartId, " context=", context, ".");
+         lastWarnMs = nowMs;
+      }
+      ExpertRemove();
+      ChartClose(ChartID());
+      return true;
+   }
+
+   if(nowMs - lastWarnMs >= 30000)
+   {
+      Print(EmojiWarning(), " Worker pausing: coordinator heartbeat stale (",
+            staleMs / 1000, "s). Key=", G_RuntimeCoordinatorKey,
+            " ownerChart=", ownerChartId,
+            " ownerAlive=", (ownerAlive ? "true" : "false"),
+            ". Halting trades until coordinator returns.");
+      lastWarnMs = nowMs;
+   }
+
+   return true;
 }
 
 void Master_OnTimer()
@@ -4950,35 +5077,8 @@ void Master_OnTick()
 
    MasterPublishCoordinatorAliveHeartbeatFast();
 
-   // --- WORKER COORDINATOR HEARTBEAT GUARD ---
-   // If we're a worker and the coordinator hasn't pinged its heartbeat for >10s,
-   // halt new entries so workers don't fly blind without system-wide risk control.
-   if(IsParallelWorkerMode() && G_RuntimeCoordinatorKey != "")
-   {
-      string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
-      if(GlobalVariableCheck(coordAliveGV))
-      {
-         ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
-         ulong nowMs    = GetTickCount64();
-         if(lastBeat > 0 && nowMs >= lastBeat && (nowMs - lastBeat) > 10000)
-         {
-            static ulong lastWarnMs = 0;
-            if(nowMs - lastWarnMs >= 30000)
-            {
-               string coordOwnerGV = "MBP_COORD_OWNER_" + G_RuntimeCoordinatorKey;
-               long ownerChartId = GlobalVariableCheck(coordOwnerGV) ? (long)GlobalVariableGet(coordOwnerGV) : 0;
-               bool ownerAlive = (ownerChartId > 0 && MBP_IsChartAlive(ownerChartId));
-               Print(EmojiWarning(), " Worker pausing: coordinator heartbeat stale (",
-                     (nowMs - lastBeat) / 1000, "s). Key=", G_RuntimeCoordinatorKey,
-                     " ownerChart=", ownerChartId,
-                     " ownerAlive=", (ownerAlive ? "true" : "false"),
-                     ". Halting trades until coordinator returns.");
-               lastWarnMs = nowMs;
-            }
-            return;
-         }
-      }
-   }
+   if(MBP_WorkerShouldStopForMissingCoordinator("tick"))
+      return;
 
    ulong tickStartMs = GetTickCount();
    bool uiPanelActive = (ShowManualSection || ShowTradeList || Panel_IsModifying ||
@@ -5269,17 +5369,8 @@ void Master_OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeR
    // processing too — otherwise a paused worker still emits bridge signals for
    // trades placed by another chart that filled in for the missing coordinator,
    // producing the duplicate-emit pattern seen in the log.
-   if(IsParallelWorkerMode() && G_RuntimeCoordinatorKey != "")
-   {
-      string coordAliveGV = "MBP_COORD_ALIVE_" + G_RuntimeCoordinatorKey;
-      if(GlobalVariableCheck(coordAliveGV))
-      {
-         ulong lastBeat = (ulong)GlobalVariableGet(coordAliveGV);
-         ulong nowMs    = GetTickCount64();
-         if(lastBeat > 0 && nowMs >= lastBeat && (nowMs - lastBeat) > 10000)
-            return;
-      }
-   }
+   if(MBP_WorkerShouldStopForMissingCoordinator("trade"))
+      return;
 
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {

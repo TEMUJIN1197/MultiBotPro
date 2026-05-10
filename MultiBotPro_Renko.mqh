@@ -1028,24 +1028,6 @@ int CRenkoEngine::ResolveLivePreviewSpanSeconds() const
       if(observed > 0)
          spanSeconds = observed;
    }
-   else
-   {
-      MqlRates rates[];
-      if(CopyRates(m_customSymbol, PERIOD_M1, 0, 3, rates) >= 2)
-      {
-         datetime newest = rates[0].time;
-         datetime previous = rates[1].time;
-         if(previous > newest)
-         {
-            newest = rates[1].time;
-            previous = rates[0].time;
-         }
-
-         int observed = (int)(newest - previous);
-         if(observed > 0)
-            spanSeconds = observed;
-      }
-   }
 
    if(spanSeconds < 1)
       spanSeconds = 1;
@@ -1728,19 +1710,13 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
    color barColor = ResolveLivePreviewColor(chartId, brickClose >= brickOpen);
    string bodyName = LivePreviewBodyName();
 
-   datetime liveTickTime = (m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent();
-   datetime tCenter = ResolveLiveBarTime(liveTickTime);
-   if(tCenter <= 0)
-      tCenter = TimeCurrent();
    int spanSeconds = ResolveLivePreviewSpanSeconds();
-   int halfSpan = MathMax(1, spanSeconds / 2);
-   datetime tStart = tCenter - halfSpan;
-   datetime tEnd = tCenter + MathMax(1, spanSeconds - halfSpan);
-   if(m_lastCommittedTime > 0 && tStart <= m_lastCommittedTime)
-   {
-      tStart = m_lastCommittedTime + 1;
-      tEnd = tStart + spanSeconds;
-   }
+   datetime tStart = (m_lastCommittedTime > 0)
+                     ? (m_lastCommittedTime + 1)
+                     : ResolveLiveBarTime((m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent());
+   if(tStart <= 0)
+      tStart = TimeCurrent();
+   datetime tEnd = tStart + spanSeconds;
 
    if(ObjectFind(chartId, bodyName) < 0)
    {
