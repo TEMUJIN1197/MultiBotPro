@@ -727,7 +727,7 @@ bool Slave_LoadLatestMasterState(HedgeState &state)
    bool haveFileState = false;
 
    string masterFile = GetMasterFile(Slave_InpChannelName);
-   int h = FileOpen(masterFile, FILE_READ|FILE_BIN|FILE_COMMON);
+   int h = FileOpenRobust(masterFile, FILE_READ|FILE_BIN|FILE_COMMON);
    if(h != INVALID_HANDLE)
    {
       haveFileState = (FileReadStruct(h, fileState) > 0);
@@ -1187,7 +1187,7 @@ void Slave_ProcessSignal(HedgeSignal &sig)
 
 void Slave_ProcessSignalFileBatch(const string procFileName, const int maxSignals)
 {
-   int h = FileOpen(procFileName, FILE_READ|FILE_BIN|FILE_COMMON);
+   int h = FileOpenRobust(procFileName, FILE_READ|FILE_BIN|FILE_COMMON);
    if(h == INVALID_HANDLE)
       return;
 
@@ -1225,7 +1225,7 @@ void Slave_ProcessSignalFileBatch(const string procFileName, const int maxSignal
       return;
    }
 
-   int hw = FileOpen(procFileName, FILE_WRITE|FILE_BIN|FILE_COMMON);
+   int hw = FileOpenRobust(procFileName, FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(hw == INVALID_HANDLE)
       return;
 
@@ -1262,7 +1262,7 @@ void Slave_CheckProposals()
 
    if(!hasProposal && Slave_CanUseFileFallback(sqliteEnabled) && FileIsExist(proposalFile, FILE_COMMON))
    {
-      int h = FileOpen(proposalFile, FILE_READ|FILE_BIN|FILE_COMMON);
+      int h = FileOpenRobust(proposalFile, FILE_READ|FILE_BIN|FILE_COMMON);
       if(h == INVALID_HANDLE)
          return;
 

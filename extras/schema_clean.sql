@@ -1,5 +1,6 @@
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,4 +93,3 @@ CREATE TABLE IF NOT EXISTS shadow_params (
 );
 
 CREATE INDEX IF NOT EXISTS idx_shadow_params_symbol_updated ON shadow_params(symbol, updated_at);
-

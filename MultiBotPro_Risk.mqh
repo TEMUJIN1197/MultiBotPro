@@ -54,8 +54,9 @@ double CalculateGridStartLotFromRisk(string execSymbol, int symbolIndex, double 
                     ? entryPrice - gridDist
                     : entryPrice + gridDist;
 
-         Print(execSymbol, " [GridRisk] No SL set — using grid step (",
-               DoubleToString(gridDist / point, 0), " pts) as effective SL distance for lot sizing.");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print(execSymbol, " [GridRisk] No SL set — using grid step (",
+                  DoubleToString(gridDist / point, 0), " pts) as effective SL distance for lot sizing.");
         }
 
       if(tickSize <= 0 || tickVal <= 0 || stopLoss <= 0)
@@ -82,10 +83,11 @@ double CalculateGridStartLotFromRisk(string execSymbol, int symbolIndex, double 
          lotSize = riskAmt / profitPerLot;
 
       string typeStr = (GridRiskType == RISK_FIXED_MONEY) ? "FixedMoney" : "Percent";
-      Print(execSymbol, " Grid ", typeStr, " Calc: Dist=", DoubleToString(priceDist, 5),
-            " | Val/Lot=$", DoubleToString(profitPerLot, 2),
-            " | TargetRisk=$", DoubleToString(riskAmt, 2),
-            " -> Lots: ", DoubleToString(lotSize, 2));
+      if(MBP_VERBOSE_DIAGNOSTICS)
+         Print(execSymbol, " Grid ", typeStr, " Calc: Dist=", DoubleToString(priceDist, 5),
+               " | Val/Lot=$", DoubleToString(profitPerLot, 2),
+               " | TargetRisk=$", DoubleToString(riskAmt, 2),
+               " -> Lots: ", DoubleToString(lotSize, 2));
      }
 
    return lotSize;
@@ -238,10 +240,11 @@ double CalculateLotSize(int symbolIndex, double entryPrice, double stopLoss, ENU
                   
                   // Debug Print to verify calculation
                   string typeStr = (RiskType == RISK_FIXED_MONEY) ? "FixedMoney" : "Percent";
-                  Print(execSymbol, " ", typeStr, " Calc: Dist=", DoubleToString(priceDist, 5), 
-                        " | Val/Lot=$", DoubleToString(profitPerLot, 2), 
-                        " | TargetRisk=$", DoubleToString(riskAmt, 2), 
-                        " -> Lots: ", DoubleToString(lotSize, 2));
+                  if(MBP_VERBOSE_DIAGNOSTICS)
+                     Print(execSymbol, " ", typeStr, " Calc: Dist=", DoubleToString(priceDist, 5),
+                           " | Val/Lot=$", DoubleToString(profitPerLot, 2),
+                           " | TargetRisk=$", DoubleToString(riskAmt, 2),
+                           " -> Lots: ", DoubleToString(lotSize, 2));
                  }
               }
             else
@@ -438,10 +441,11 @@ double CalculateAggressiveGridLot(int symbolIndex, ENUM_ORDER_TYPE type, double 
 
    string typeStr = (GridAggressiveDistType == GRID_DIST_POINTS) ? "Pts" : "ATR";
 
-   Print(execSymbol, " Aggressive Grid (", typeStr, ") | Lvl: ", levelIndex,
-         " | RecovDist: ", DoubleToString(finalRecoveryDist/point, 0),
-         "pts | Need: $", DoubleToString(requiredProfit, 2),
-         " | Lot: ", calculatedLot);
+   if(MBP_VERBOSE_DIAGNOSTICS)
+      Print(execSymbol, " Aggressive Grid (", typeStr, ") | Lvl: ", levelIndex,
+            " | RecovDist: ", DoubleToString(finalRecoveryDist/point, 0),
+            "pts | Need: $", DoubleToString(requiredProfit, 2),
+            " | Lot: ", calculatedLot);
 
    return calculatedLot;
   }
@@ -574,11 +578,12 @@ double CalculateZoneRecoveryLot(int symbolIndex, ENUM_ORDER_TYPE nextType)
 // Rounding
    calculatedLot = NormalizeDouble(calculatedLot / lotStep, 0) * lotStep;
 
-   Print(execSymbol, " Zone Math | TargetPrice: ", targetPriceLevel,
-         " | Projected Equity: $", DoubleToString(projectedEquity, 2),
-         " | Need: $", DoubleToString(requiredFromNewTrade, 2),
-         " | Dist: ", DoubleToString(travelDistance, _Digits),
-         " | Calc Lot: ", calculatedLot);
+   if(MBP_VERBOSE_DIAGNOSTICS)
+      Print(execSymbol, " Zone Math | TargetPrice: ", targetPriceLevel,
+            " | Projected Equity: $", DoubleToString(projectedEquity, 2),
+            " | Need: $", DoubleToString(requiredFromNewTrade, 2),
+            " | Dist: ", DoubleToString(travelDistance, _Digits),
+            " | Calc Lot: ", calculatedLot);
 
    return calculatedLot;
   }

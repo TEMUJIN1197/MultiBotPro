@@ -15,6 +15,10 @@
 #define DASH_HEARTBEAT_BLINK_MS 250
 #define DASH_DRAG_THRESHOLD_PX 5
 
+// Hot-path diagnostics are intentionally off by default. Enable only when
+// debugging risk/bounds calculations; live logs become noisy very quickly.
+#define MBP_VERBOSE_DIAGNOSTICS false
+
 class CChartFactory;
 
 // --- ENGINE ENUMS (Canonical definitions) ---
@@ -54,6 +58,16 @@ enum ENUM_COMPUTE_BACKEND {
    COMPUTE_BACKEND_DLL,    // C++ Optimized DLL
    COMPUTE_BACKEND_PYTHON, // Shadow Master AI
    COMPUTE_BACKEND_NATIVE  // Native MQL5
+};
+
+enum ENUM_MBP_TRADE_TYPE
+{
+   MBP_TRADE_UNKNOWN,
+   MBP_TRADE_GRID,
+   MBP_TRADE_STACK,
+   MBP_TRADE_ZONE,
+   MBP_TRADE_MASTER,
+   MBP_TRADE_MANUAL
 };
 
 enum ENUM_APP_MODE {  // Legacy Alias support

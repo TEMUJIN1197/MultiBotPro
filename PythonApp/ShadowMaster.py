@@ -30,6 +30,34 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def atomic_json_write(path: str, data: Dict[str, Any]) -> None:
+    """Write JSON through a same-directory temp file, then atomically replace."""
+    directory = os.path.dirname(os.path.abspath(path)) or os.getcwd()
+    os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
+
+
+def sqlite_connect_runtime(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def sqlite_write_with_retry(operation, attempts: int = 5, base_delay: float = 0.05):
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt + 1 >= attempts:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+
+
 DEFAULT_CONFIG = {
     "mt5_data_dir": r"C:\Users\Administrator\AppData\Roaming\MetaQuotes\Terminal\D0E8209F77C8CF37AD8BF550E51FF075\MQL5\Files",
     "symbols": ["AUDNZD_ATR", "CHFJPY_ATR", "EURGBP_ATR", "USDCAD_ATR"],
@@ -193,7 +221,19 @@ def load_config(config_path: str = "") -> Dict:
                 cfg[k] = merged
             else:
                 cfg[k] = v
+    validate_runtime_config(cfg)
     return cfg
+
+
+def validate_runtime_config(cfg: Dict[str, Any]) -> None:
+    symbols = cfg.get("symbols", [])
+    if not isinstance(symbols, list) or not symbols:
+        raise ValueError("ShadowMaster config requires a non-empty symbols list")
+    if not str(cfg.get("sqlite_path", "")).strip():
+        raise ValueError("ShadowMaster config requires sqlite_path")
+    cfg["lookback_days"] = max(1, int(to_float(cfg.get("lookback_days", 7), 7)))
+    cfg["max_workers"] = max(1, min(16, int(to_float(cfg.get("max_workers", 4), 4))))
+    cfg["cycle_hours"] = max(0, int(to_float(cfg.get("cycle_hours", 6), 6)))
 
 
 @dataclass
@@ -208,6 +248,7 @@ class ShadowMasterV3:
         self.cfg = cfg
         self.sia = None
         self._openai_warning_emitted = False
+        self._sentiment_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
         if nltk and SentimentIntensityAnalyzer:
             try:
                 nltk.data.find("sentiment/vader_lexicon.zip")
@@ -258,7 +299,7 @@ class ShadowMasterV3:
                     external_scores = self._external_scores(base_curr, quote_curr)
                     scores.extend(external_scores)
 
-                ai_report = self._openai_sentiment_report(
+                ai_report = self._openai_sentiment_report_cached(
                     symbol=symbol,
                     base_curr=base_curr,
                     quote_curr=quote_curr,
@@ -295,6 +336,45 @@ class ShadowMasterV3:
     def _openai_settings(self) -> Dict[str, Any]:
         settings = self.cfg.get("openai", {})
         return settings if isinstance(settings, dict) else {}
+
+    def _openai_sentiment_report_cached(
+        self,
+        symbol: str,
+        base_curr: str,
+        quote_curr: str,
+        market_snapshot: Dict[str, Any],
+        rss_headlines: List[str],
+        external_scores: List[float],
+    ) -> Dict[str, Any]:
+        ttl_seconds = int(to_float(self._openai_settings().get("cache_ttl_seconds", 3600), 3600))
+        snapshot_key = json.dumps(
+            {
+                "symbol": symbol,
+                "close": market_snapshot.get("last_close"),
+                "ret_1h": market_snapshot.get("pct_change_60_bars"),
+                "ret_4h": market_snapshot.get("pct_change_240_bars"),
+                "headline_count": len(rss_headlines),
+                "external": [round(float(x), 4) for x in external_scores[:5]],
+            },
+            sort_keys=True,
+        )
+        cache_key = f"{symbol}|{snapshot_key}"
+        now = time.time()
+        cached = self._sentiment_cache.get(cache_key)
+        if cached and now < cached[1]:
+            return cached[0]
+
+        report = self._openai_sentiment_report(
+            symbol=symbol,
+            base_curr=base_curr,
+            quote_curr=quote_curr,
+            market_snapshot=market_snapshot,
+            rss_headlines=rss_headlines,
+            external_scores=external_scores,
+        )
+        if report and ttl_seconds > 0:
+            self._sentiment_cache[cache_key] = (report, now + ttl_seconds)
+        return report
 
     def _openai_enabled(self) -> bool:
         return to_bool(self._openai_settings().get("enabled"), False)
@@ -597,6 +677,38 @@ class ShadowMasterV3:
         score = sharpe - (max_dd * 5.0) - cost
         return score, max_dd, trade_count
 
+    def validate_shadow_params(self, symbol: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        if not params:
+            return {}
+
+        limits = {
+            "MA1_Period": (1, 500),
+            "MA2_Period": (2, 1000),
+            "Box_Lookback": (1, 100),
+            "ADX_Period": (2, 100),
+            "ADX_MinLevel": (0.0, 100.0),
+            "CurrencyStrengthDelta": (0.0, 50.0),
+            "GridMultiplier": (0.0, 10.0),
+        }
+        cleaned = dict(params)
+        clamp_notes: List[str] = []
+        for key, (min_value, max_value) in limits.items():
+            if key not in cleaned:
+                continue
+            value = to_float(cleaned.get(key), min_value)
+            clamped = max(min_value, min(max_value, value))
+            if clamped != value:
+                clamp_notes.append(f"{key}:{value}->{clamped}")
+            cleaned[key] = int(clamped) if isinstance(min_value, int) and isinstance(max_value, int) else float(clamped)
+
+        if cleaned.get("schema_version") != "v3":
+            cleaned["schema_version"] = "v3"
+        cleaned["ShadowSymbol"] = symbol
+        if clamp_notes:
+            cleaned["ValidationNotes"] = ";".join(clamp_notes)
+            logging.warning("Shadow params clamped for %s: %s", symbol, cleaned["ValidationNotes"])
+        return cleaned
+
     def optimize_symbol(self, symbol: str) -> SymbolResult:
         logging.info("--- Preliminary Calculations for %s ---", symbol)
         df = self.fetch_data(symbol, self.cfg["entry_tf"], self.cfg["lookback_days"])
@@ -692,6 +804,8 @@ class ShadowMasterV3:
             best["AI_Killswitch"] = to_bool(ai_report.get("killswitch"), False)
             best["AI_Summary"] = str(ai_report.get("summary", ""))[:180]
 
+        best = self.validate_shadow_params(symbol, best)
+
         sys.stdout.write("\r" + " " * 100 + "\r")
         logging.info("Best %s: %s", symbol, best)
 
@@ -705,42 +819,42 @@ class ShadowMasterV3:
         os.makedirs(data_dir, exist_ok=True)
         prefix = self.cfg.get("shadow_config_prefix", "ShadowConfig")
         out_path = os.path.join(data_dir, f"{prefix}_{result.symbol}.json")
-        tmp_path = out_path + ".tmp"
-
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(result.best_params, f, indent=2)
-        os.replace(tmp_path, out_path)
+        atomic_json_write(out_path, result.best_params)
 
         if self.cfg.get("write_sqlite", True):
             self.write_sqlite_config(result.symbol, result.best_params)
 
     def write_sqlite_config(self, symbol: str, params: Dict) -> None:
         db = self.cfg.get("sqlite_path", "MultiBotPro_v3.db")
-        conn = sqlite3.connect(db)
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS shadow_params (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    score REAL,
-                    updated_at TEXT NOT NULL
+
+        def write_once() -> None:
+            conn = sqlite_connect_runtime(db)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS shadow_params (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        score REAL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute(
-                "INSERT INTO shadow_params(symbol, payload_json, score, updated_at) VALUES(?,?,?,?)",
-                (
-                    symbol,
-                    json.dumps(params),
-                    float(params.get("Score", -9999.0)),
-                    datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+                conn.execute(
+                    "INSERT INTO shadow_params(symbol, payload_json, score, updated_at) VALUES(?,?,?,?)",
+                    (
+                        symbol,
+                        json.dumps(params),
+                        float(params.get("Score", -9999.0)),
+                        datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        sqlite_write_with_retry(write_once)
 
     def run_cycle(self) -> None:
         logging.info("STARTING SHADOW MASTER OPTIMIZATION CYCLE...")
@@ -762,11 +876,10 @@ class ShadowMasterV3:
 
             data_dir = self.cfg["mt5_data_dir"] or os.getcwd()
             sync_path = os.path.join(data_dir, "ShadowSync.json")
-            with open(sync_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"sync_time": time.time(), "schema_version": "v3", "symbols": [r.symbol for r in results]},
-                    f,
-                )
+            atomic_json_write(
+                sync_path,
+                {"sync_time": time.time(), "schema_version": "v3", "symbols": [r.symbol for r in results]},
+            )
 
             print("\n" + "=" * 60)
             print("SHADOW MASTER FULL CYCLE COMPLETE")
@@ -795,7 +908,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-

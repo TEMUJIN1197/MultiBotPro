@@ -1030,11 +1030,11 @@ void UpdateDashboard(int dummyIndex)
    if(DashboardCollapsed || G_IS_DEINIT) return;
 
    // [OPTIONAL] Throttle Redraws internally if called from multiple sources
-   static uint lastDraw = 0;
-   uint redrawThrottleMs = (ShowManualSection || ShowTradeList || Panel_IsModifying || IsWorkerDashboardMode()) ? 75 : 250;
-   if(!G_ForceDashboardRefresh && GetTickCount() - lastDraw < redrawThrottleMs) return;
+   static ulong lastDraw = 0;
+   ulong redrawThrottleMs = (ShowManualSection || ShowTradeList || Panel_IsModifying || IsWorkerDashboardMode()) ? 75 : 250;
+   if(!G_ForceDashboardRefresh && GetTickCount64() - lastDraw < redrawThrottleMs) return;
    G_ForceDashboardRefresh = false;
-   lastDraw = GetTickCount();
+   lastDraw = GetTickCount64();
 
    if(IsWorkerDashboardMode())
    {

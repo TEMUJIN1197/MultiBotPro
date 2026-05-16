@@ -561,11 +561,9 @@ bool QueueBridgeProposalAsync(int symbolIndex,
    }
    prop.risk_money = riskMoney;
 
-   ArrayInitialize(prop.symbol, 0);
-   StringToCharArray(execSymbol, prop.symbol, 0, ArraySize(prop.symbol));
+   BridgeCopyStringToCharArray(execSymbol, prop.symbol);
 
-   ArrayInitialize(prop.comment, 0);
-   StringToCharArray(comment, prop.comment, 0, ArraySize(prop.comment));
+   BridgeCopyStringToCharArray(comment, prop.comment);
 
    double pt = SymbolInfoDouble(execSymbol, SYMBOL_POINT);
    if(pt <= 0.0) pt = 1.0;
@@ -779,7 +777,7 @@ void ProcessBridgePendingRequest()
    }
 
    int pollMs = (InpV3_HandshakePollMs > 0) ? InpV3_HandshakePollMs : 100;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if((nowMs - G_BridgePending.lastExecAttemptMs) < (ulong)MathMax(50, pollMs))
       return;
 
@@ -819,8 +817,8 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
    if(!bypassBridge)
    {
       static ulong lastAttemptTime = 0;
-      if(GetTickCount() - lastAttemptTime < 2000) return;
-      lastAttemptTime = GetTickCount();
+      if(GetTickCount64() - lastAttemptTime < 2000) return;
+      lastAttemptTime = GetTickCount64();
    }
   // ----------------------------------
    string analysisSymbol = SymbolData[symbolIndex].symbol;
@@ -833,7 +831,7 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
       if(IsBridgeChannelLockActive(InpHedgeChannel, activeRequestId, activeUntil))
       {
          static ulong lastBridgeLockLog = 0;
-         ulong nowMs = GetTickCount();
+         ulong nowMs = GetTickCount64();
          if((nowMs - lastBridgeLockLog) >= 1000)
          {
             PrintFormat(EmojiShield() + " Bridge entry suppressed: channel lock is active (req=%I64d until=%s)",
@@ -861,10 +859,10 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
            if(GlobalVariableGet(stopVar) > 0.1)
            {
                // Print only once per second to avoid log spam if looped
-               static uint lastLog = 0;
-               if(GetTickCount() - lastLog > 60000) {
+               static ulong lastLog = 0;
+               if(GetTickCount64() - lastLog > 60000) {
                    Print("⚠️ Trading blocked by the hedge master stop flag. Trade entry aborted.");
-                   lastLog = GetTickCount();
+                   lastLog = GetTickCount64();
                }
                return; // EXIT IMMEDIATELY - DO NOT TRADE
            }
@@ -1198,11 +1196,9 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
       }
       prop.risk_money = riskMoney;
 
-      ArrayInitialize(prop.symbol, 0);
-      StringToCharArray(execSymbol, prop.symbol, 0, ArraySize(prop.symbol));
+      BridgeCopyStringToCharArray(execSymbol, prop.symbol);
 
-      ArrayInitialize(prop.comment, 0);
-      StringToCharArray(comment, prop.comment, 0, ArraySize(prop.comment));
+      BridgeCopyStringToCharArray(comment, prop.comment);
 
       double pt = SymbolInfoDouble(execSymbol, SYMBOL_POINT);
       if(pt <= 0.0) pt = 1.0;

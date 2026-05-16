@@ -13,6 +13,9 @@ $InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 if (-not (Test-Path $InnoCompiler)) {
     $InnoCompiler = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
 }
+if (-not (Test-Path $InnoCompiler)) {
+    $InnoCompiler = "$env:LOCALAPPDATA\Programs\Antigravity\resources\app\node_modules\innosetup\bin\ISCC.exe"
+}
 # $SystemPythonRoot was used by Stage-TrimmedPythonRuntime to fall back to a system
 # Python install when the workspace WinPython payload was empty. Both are now
 # dead code — ShadowMaster.exe is a self-contained PyInstaller binary so no

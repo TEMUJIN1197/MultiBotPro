@@ -18,9 +18,9 @@ private:
    CMbpMessageQueue *m_workerQueue;
    CRiskEngine *m_riskEngine;
 
-   static ulong m_lastBankSaveMs;
-   static ulong m_lastSyntheticPumpMs;
-   static ulong m_lastDeferredHousekeepingMs;
+   ulong m_lastBankSaveMs;
+   ulong m_lastSyntheticPumpMs;
+   ulong m_lastDeferredHousekeepingMs;
 
 public:
    CCoordinator(CSystemState *sysState, CMbpMessageQueue *coordQueue, CMbpMessageQueue *workerQueue, CRiskEngine *riskEngine) :
@@ -52,7 +52,7 @@ public:
    // Main coordinator cycle (called from OnTimer)
    void ProcessCycle()
    {
-      ulong timerNowMs = GetTickCount();
+      ulong timerNowMs = GetTickCount64();
       bool coordinatorMode = IsParallelCoordinatorMode();
       bool workerMode = IsParallelWorkerMode();
 
@@ -102,7 +102,7 @@ public:
    // Handle chart event from OnChartEvent
    void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
    {
-      G_MasterUiPriorityUntilMs = GetTickCount() + 250;
+      G_MasterUiPriorityUntilMs = GetTickCount64() + 250;
 
       if(id == CHARTEVENT_OBJECT_DRAG)
       {
@@ -426,8 +426,8 @@ private:
    void ProcessSymbolRowClick(const string &symbolRowObj)
    {
       static string lastClickedSymObj = "";
-      static uint lastClickTimeSym = 0;
-      uint currentTime = GetTickCount();
+      static ulong lastClickTimeSym = 0;
+      ulong currentTime = GetTickCount64();
 
       if(symbolRowObj == lastClickedSymObj && (currentTime - lastClickTimeSym) < 500)
       {
@@ -523,7 +523,7 @@ private:
       DashboardY = newY;
       MoveDashboard(DashboardX, DashboardY);
       SyncDashboardHeartbeatLayout();
-      G_MasterUiPriorityUntilMs = GetTickCount() + 500;
+      G_MasterUiPriorityUntilMs = GetTickCount64() + 500;
    }
 
    void HandleWorkerRiskBreach(const SMbpMessage &msg)
@@ -539,10 +539,5 @@ private:
          m_coordinatorQueue.AcknowledgeById(msg.ackId);
    }
 };
-
-// Static member initialization
-ulong CCoordinator::m_lastBankSaveMs = 0;
-ulong CCoordinator::m_lastSyntheticPumpMs = 0;
-ulong CCoordinator::m_lastDeferredHousekeepingMs = 0;
 
 #endif

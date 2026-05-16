@@ -29,15 +29,6 @@ void CheckGridOnTick(int symbolIndex)
 //+------------------------------------------------------------------+
 void CheckNewGridLevel(int symbolIndex)
   {
-   // 1. BRIDGE SAFETY CHECK (Highest Priority)
-   if(IsBridgeRuntimeEnabled())
-   {
-      string stopVar = InpHedgeChannel + "_STOP_FLAG";
-      if(GlobalVariableCheck(stopVar)) {
-         if(GlobalVariableGet(stopVar) > 0.1) return; // EXIT IMMEDIATELY
-      }
-   }
-
    // GLOBAL COOLDOWN BLOCK
    if(IsGlobalCooldownActive()) return;
 
@@ -53,10 +44,10 @@ void CheckNewGridLevel(int symbolIndex)
          if(GlobalVariableGet(stopVar) > 0.1)
          {
              // Optional: Print once per minute to avoid log spam
-             static uint lastLog = 0;
-             if(GetTickCount() - lastLog > 60000) {
+             static ulong lastLog = 0;
+             if(GetTickCount64() - lastLog > 60000) {
                  Print("🛡️ Grid sequencing blocked by the hedge master. Skipping the next grid-level check.");
-                 lastLog = GetTickCount();
+                 lastLog = GetTickCount64();
              }
              return; // EXIT: Do not calculate levels, do not trade.
          }

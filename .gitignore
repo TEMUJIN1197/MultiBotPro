@@ -1,2 +1,53 @@
-.tools/
-accel_new.dll
+# MultiBotPro generated artifacts
+
+# Compiled EA / native binaries / installers
+*.ex5
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# Build, installer, and staging output
+build/
+dist/
+Output/
+PackageStage/
+
+# Python caches and bundled runtime payloads
+PythonApp/WinPython/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+
+# Runtime state and local data
+runtime_v3.json
+ShadowMasterRuntime.json
+ShadowSync.json
+status_snapshot.json
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and generated reports
+*.log
+compile*.txt
+compile_*.log
+new_compile.log
+
+# MT5/editor local output
+*.mproj
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.bak.*
+*.old
+
+# Keep source-like samples and schemas even if nearby runtime files are ignored
+!runtime_v3.openai.sample.json
+!sqlite_schema.sql
+!extras/schema_clean.sql
+!extras/sqlite_schema.sql

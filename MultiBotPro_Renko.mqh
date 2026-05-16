@@ -477,7 +477,7 @@ void CRenkoEngine::ProcessTimer(const MqlTick &tick, const bool hasLiveTick)
    }
 
    RefreshBlockSize(TimeCurrent(), false);
-   if(m_flushPending && (GetTickCount() - m_lastFlushTryMs) > 1000)
+   if(m_flushPending && (GetTickCount64() - m_lastFlushTryMs) > 1000)
    {
       FlushRamToDisk(true);
    }
@@ -811,7 +811,7 @@ void CRenkoEngine::RefreshBlockSize(const datetime timeRef, const bool force)
 {
    if(m_blockMode == BLOCK_MODE_ATR_PERCENT && m_atrHandle != INVALID_HANDLE)
    {
-      ulong nowMs = GetTickCount();
+      ulong nowMs = GetTickCount64();
       if(force || m_currentATR <= 0.0 || !m_adaptiveATR ||
          (nowMs - m_lastAtrFetchMs) >= (ulong)MathMax(50, m_atrRefreshMs))
       {
@@ -1528,7 +1528,7 @@ void CRenkoEngine::PublishLiveQuoteTick(const double bid, const double ask, long
    if(bid <= 0.0 || ask <= 0.0)
       return;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(!m_tickMirroringEnabled)
    {
       if(m_tickMirrorRetryAfterMs == 0 || nowMs < m_tickMirrorRetryAfterMs)
@@ -1795,7 +1795,7 @@ void CRenkoEngine::FlushRamToDisk(bool force)
       }
    }
    ResetLastError();
-   m_lastFlushTryMs = GetTickCount();
+   m_lastFlushTryMs = GetTickCount64();
 
    bool ratesOk = CustomRatesUpdate(m_customSymbol, m_ramRateBuffer, total);
    int rateErr = _LastError;
@@ -1916,9 +1916,9 @@ bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommi
                // the last fed timestamp before draining, or we'll get 0 bars back.
                long histInfo[];
                ArrayResize(histInfo, 4);
-               ulong pollStart = GetTickCount();
+               ulong pollStart = GetTickCount64();
                const ulong pollTimeoutMs = 30000; // 30s max wait
-               while((GetTickCount() - pollStart) < pollTimeoutMs)
+               while((GetTickCount64() - pollStart) < pollTimeoutMs)
                {
                   if(MBP_RenkoGetHistoryInfoW(m_workerSessionKey, m_customSymbol, histInfo) > 0)
                   {
@@ -2058,9 +2058,9 @@ bool CRenkoEngine::ReplayTicksFrom(const datetime fromTime, const bool skipCommi
                // has consumed all queued ticks (lastTickMsc reaches lastFedTimeMsc).
                long histInfo[];
                ArrayResize(histInfo, 4);
-               ulong pollStart = GetTickCount();
+               ulong pollStart = GetTickCount64();
                const ulong pollTimeoutMs = 30000;
-               while((GetTickCount() - pollStart) < pollTimeoutMs)
+               while((GetTickCount64() - pollStart) < pollTimeoutMs)
                {
                   if(MBP_RenkoGetHistoryInfoW(m_workerSessionKey, m_customSymbol, histInfo) > 0)
                   {
@@ -2277,7 +2277,7 @@ bool CRenkoEngine::EnsureWorkerSession()
          return false;
       }
       m_workerSeedBlockSize = seedBlockSize;
-      m_workerLastReseedMs = GetTickCount();
+      m_workerLastReseedMs = GetTickCount64();
       m_workerSessionEnabled = true;
       m_workerStallCount = 0;
       Print("[Renko] DLL acceleration active for ", m_customSymbol,

@@ -127,6 +127,12 @@ public:
       if(!InpAIModeEnabled)
          return false;
 
+      if(runtime_config_path == "" || !MBP_AIFileExists(runtime_config_path))
+      {
+         Print("AI Bridge: ShadowMaster launch skipped - runtime config not found at ", runtime_config_path);
+         return false;
+      }
+
       string exePath = MBP_GetShadowMasterExecutablePath();
       string workingDir = MBP_GetShadowMasterWorkingDirectory();
 

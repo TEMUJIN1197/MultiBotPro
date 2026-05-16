@@ -28,7 +28,7 @@ public:
    // Called very first thing in OnTick
    void UpdateTickCache()
    {
-      ulong nowMs = GetTickCount();
+      ulong nowMs = GetTickCount64();
       // Only run expensive global cache updates every 100ms max
       if(nowMs - m_lastTickProcessMs < 100) return;
       

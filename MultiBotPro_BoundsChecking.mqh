@@ -24,8 +24,9 @@ namespace MBP_Bounds
    {
       if(!IsValidIndex(array, index))
       {
-         Print("MBP BoundsCheck: Array index out of bounds [" +
-               IntegerToString(index) + "/" + IntegerToString(ArraySize(array)) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Array index out of bounds [" +
+                  IntegerToString(index) + "/" + IntegerToString(ArraySize(array)) + "]");
          return false;
       }
       outValue = array[index];
@@ -38,8 +39,9 @@ namespace MBP_Bounds
    {
       if(!IsValidIndex(array, index))
       {
-         Print("MBP BoundsCheck: Array index out of bounds [" +
-               IntegerToString(index) + "/" + IntegerToString(ArraySize(array)) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Array index out of bounds [" +
+                  IntegerToString(index) + "/" + IntegerToString(ArraySize(array)) + "]");
          return false;
       }
       array[index] = value;
@@ -63,9 +65,10 @@ namespace MBP_Bounds
    bool IsValidSymbol(const string &symbol)
    {
       int len = StringLen(symbol);
-      if(len < 1 || len > 20)
+      if(len < 1 || len > 32)
       {
-         Print("MBP BoundsCheck: Invalid symbol length [" + IntegerToString(len) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Invalid symbol length [" + IntegerToString(len) + "]");
          return false;
       }
       return true;
@@ -82,7 +85,8 @@ namespace MBP_Bounds
    {
       if(lot <= 0)
       {
-         Print("MBP BoundsCheck: Lot size <= 0 [" + DoubleToString(lot, 4) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Lot size <= 0 [" + DoubleToString(lot, 4) + "]");
          return false;
       }
 
@@ -92,15 +96,17 @@ namespace MBP_Bounds
 
       if(minLot == 0 || maxLot == 0)
       {
-         Print("MBP BoundsCheck: Cannot determine lot limits for " + symbol);
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Cannot determine lot limits for " + symbol);
          return true; // Assume valid if can't query
       }
 
       if(lot < minLot || lot > maxLot)
       {
-         Print("MBP BoundsCheck: Lot outside range [" + DoubleToString(lot, 4) +
-               " not in " + DoubleToString(minLot, 4) + ".." +
-               DoubleToString(maxLot, 4) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Lot outside range [" + DoubleToString(lot, 4) +
+                  " not in " + DoubleToString(minLot, 4) + ".." +
+                  DoubleToString(maxLot, 4) + "]");
          return false;
       }
 
@@ -110,8 +116,9 @@ namespace MBP_Bounds
          double remainder = MathMod(lot - minLot, stepLot);
          if(remainder > 0.0001)
          {
-            Print("MBP BoundsCheck: Lot not aligned to step [" + DoubleToString(lot, 4) +
-                  " step=" + DoubleToString(stepLot, 4) + "]");
+            if(MBP_VERBOSE_DIAGNOSTICS)
+               Print("MBP BoundsCheck: Lot not aligned to step [" + DoubleToString(lot, 4) +
+                     " step=" + DoubleToString(stepLot, 4) + "]");
             return false;
          }
       }
@@ -124,7 +131,8 @@ namespace MBP_Bounds
    {
       if(price <= 0)
       {
-         Print("MBP BoundsCheck: Price <= 0 [" + DoubleToString(price, 5) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Price <= 0 [" + DoubleToString(price, 5) + "]");
          return false;
       }
 
@@ -133,7 +141,8 @@ namespace MBP_Bounds
 
       if(bid <= 0 || ask <= 0)
       {
-         Print("MBP BoundsCheck: Cannot get market price for " + symbol);
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Cannot get market price for " + symbol);
          return true; // Assume valid if can't query
       }
 
@@ -144,8 +153,9 @@ namespace MBP_Bounds
 
       if(deviation > maxDeviation)
       {
-         Print("MBP BoundsCheck: Price deviates too much from market [" +
-               DoubleToString(price, 5) + " vs " + DoubleToString(mid, 5) + "]");
+         if(MBP_VERBOSE_DIAGNOSTICS)
+            Print("MBP BoundsCheck: Price deviates too much from market [" +
+                  DoubleToString(price, 5) + " vs " + DoubleToString(mid, 5) + "]");
          return false;
       }
 

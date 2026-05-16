@@ -83,6 +83,17 @@ struct HedgeState
    ulong  reset_id;
 };
 
+void BridgeCopyStringToCharArray(const string value, char &target[])
+{
+   int size = ArraySize(target);
+   if(size <= 0)
+      return;
+
+   ArrayInitialize(target, 0);
+   StringToCharArray(value, target, 0, size - 1);
+   target[size - 1] = 0;
+}
+
 bool V3_RuntimeEnabled(const bool enabled, const string sqlitePath)
 {
    return (enabled && StringLen(sqlitePath) > 0);
@@ -144,7 +155,7 @@ bool V3_SqliteBackoffActive()
    if(g_V3_SqliteBackoffUntilMs == 0)
       return false;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(nowMs >= g_V3_SqliteBackoffUntilMs)
    {
       g_V3_SqliteBackoffUntilMs = 0;
@@ -156,7 +167,7 @@ bool V3_SqliteBackoffActive()
 
 void V3_RegisterSqliteFailure(const string stage)
 {
-   g_V3_SqliteBackoffUntilMs = GetTickCount() + (ulong)V3_SQLITE_BACKOFF_MS;
+   g_V3_SqliteBackoffUntilMs = GetTickCount64() + (ulong)V3_SQLITE_BACKOFF_MS;
 
    datetime now = TimeCurrent();
    if((g_V3_LastSqliteLogTime == 0) || ((now - g_V3_LastSqliteLogTime) >= V3_SQLITE_LOCK_LOG_INTERVAL_SEC))
@@ -445,10 +456,7 @@ bool V3_ParseSignalPayload(string payload, HedgeSignal &sig)
 
    raw = V3_ExtractJSONValue(payload, "symbol");
    if(raw != "")
-   {
-      ArrayInitialize(sig.symbol, 0);
-      StringToCharArray(raw, sig.symbol, 0, ArraySize(sig.symbol));
-   }
+      BridgeCopyStringToCharArray(raw, sig.symbol);
 
    string rawTime = V3_ExtractJSONValue(payload, "time_msc");
    if(rawTime != "")
@@ -456,10 +464,7 @@ bool V3_ParseSignalPayload(string payload, HedgeSignal &sig)
 
    string rawComment = V3_ExtractJSONValue(payload, "comment");
    if(rawComment != "")
-   {
-      ArrayInitialize(sig.comment, 0);
-      StringToCharArray(rawComment, sig.comment, 0, ArraySize(sig.comment));
-   }
+      BridgeCopyStringToCharArray(rawComment, sig.comment);
 
    return true;
 }
@@ -501,9 +506,9 @@ bool V3_ParseProposalPayload(string payload, BridgeProposal &prop)
    raw = V3_ExtractJSONValue(payload, "time_msc");
    if(raw != "") prop.time_msc = (long)StringToInteger(raw);
    raw = V3_ExtractJSONValue(payload, "symbol");
-   if(raw != "") StringToCharArray(raw, prop.symbol, 0, ArraySize(prop.symbol));
+   if(raw != "") BridgeCopyStringToCharArray(raw, prop.symbol);
    raw = V3_ExtractJSONValue(payload, "comment");
-   if(raw != "") StringToCharArray(raw, prop.comment, 0, ArraySize(prop.comment));
+   if(raw != "") BridgeCopyStringToCharArray(raw, prop.comment);
    return true;
 }
 
@@ -724,7 +729,7 @@ bool V3_SelectPendingSignalRow(const string sqlitePath, const string channel, lo
          sig.sl_dist_points = slDist;
          sig.tp_dist_points = tpDist;
          sig.risk_money = riskMoney;
-         StringToCharArray(symbol, sig.symbol, 0, ArraySize(sig.symbol));
+         BridgeCopyStringToCharArray(symbol, sig.symbol);
          V3_ParseSignalPayload(payload, sig);
          found = true;
       }
@@ -1513,4 +1518,3 @@ int FileOpenRobust(string filename, int flags)
    return INVALID_HANDLE;
 }
 //+------------------------------------------------------------------+
-

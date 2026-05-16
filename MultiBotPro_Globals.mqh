@@ -60,7 +60,7 @@ bool   IsDragging = false;
 int    DragInteractionX = 0;
 int    DragInteractionY = 0;
 
-uint   G_DashboardHeartbeatStartMs = 0;
+ulong  G_DashboardHeartbeatStartMs = 0;
 bool   G_DashboardHeartbeatWasEligible = false;
 int    G_EntryGateReason[];
 string G_EntryGateMessage[];

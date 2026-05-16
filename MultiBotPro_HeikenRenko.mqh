@@ -481,9 +481,9 @@ private:
       // Poll until the DLL worker thread has processed all fed data.
       long histInfo[];
       ArrayResize(histInfo, 4);
-      ulong pollStart = GetTickCount();
+      ulong pollStart = GetTickCount64();
       const ulong pollTimeoutMs = 30000;
-      while((GetTickCount() - pollStart) < pollTimeoutMs)
+      while((GetTickCount64() - pollStart) < pollTimeoutMs)
       {
          if(MBP_RenkoGetHistoryInfoW(m_dllSessionKey, m_customSymbol, histInfo) > 0)
          {

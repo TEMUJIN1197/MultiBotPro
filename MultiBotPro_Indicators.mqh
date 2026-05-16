@@ -226,7 +226,7 @@ void QueueBoxHistoryWarmup(const int symbolIndex, const ulong delayMs = 0)
 
    SymbolData[symbolIndex].BoxHistoryWarmupQueued = true;
    SymbolData[symbolIndex].BoxHistoryWarmupDone = false;
-   SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount() + delayMs;
+   SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount64() + delayMs;
   }
 
 void ProcessDeferredBoxHistoryWarmup()
@@ -236,7 +236,7 @@ void ProcessDeferredBoxHistoryWarmup()
    if(totalSymbols <= 0)
       return;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    for(int offset = 0; offset < totalSymbols; offset++)
      {
       int symbolIndex = (nextSymbolIndex + offset) % totalSymbols;
@@ -1332,12 +1332,12 @@ void RefreshCurrentChartBoxLines(const bool force = false)
 
    static string lastChartSymbol = "";
    static string lastFocusSymbol = "";
-   static uint lastRefreshMs = 0;
+   static ulong lastRefreshMs = 0;
    string focusSymbol = SymbolData[symbolIndex].symbol;
    bool symbolChanged = (lastChartSymbol != _Symbol || lastFocusSymbol != focusSymbol);
    bool missingBoxObjects = (ObjectFind(0, "BoxSeg_H_0") < 0 || ObjectFind(0, "BoxSeg_L_0") < 0);
    bool missingBoxData = (SymbolData[symbolIndex].BoxHighCount == 0 || SymbolData[symbolIndex].BoxLowCount == 0);
-   uint now = GetTickCount();
+   ulong now = GetTickCount64();
 
    if(!force && !symbolChanged && !missingBoxObjects && !missingBoxData && (now - lastRefreshMs) < 750)
       return;
@@ -1446,7 +1446,7 @@ void BackfillBoxHistory(int symbolIndex)
      {
       SymbolData[symbolIndex].BoxHistoryWarmupQueued = true;
       SymbolData[symbolIndex].BoxHistoryWarmupDone = false;
-      SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount() + 25;
+      SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount64() + 25;
       return;
      }
 

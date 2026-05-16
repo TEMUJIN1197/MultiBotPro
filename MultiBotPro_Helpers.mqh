@@ -7,6 +7,45 @@
 #property copyright "Copyright 2025, MetaQuotes Ltd."
 #property link      "https://discord.com/channels/929723953415589918/929723953415589920"
 
+ENUM_MBP_TRADE_TYPE ClassifyTradeComment(const string comment)
+  {
+   if(StringFind(comment, "Grid") >= 0)
+      return MBP_TRADE_GRID;
+   if(StringFind(comment, "Stack") >= 0)
+      return MBP_TRADE_STACK;
+   if(StringFind(comment, "Zone") >= 0)
+      return MBP_TRADE_ZONE;
+   if(StringFind(comment, PREFIX_MANUAL) >= 0)
+      return MBP_TRADE_MANUAL;
+   if(StringFind(comment, "Master") >= 0)
+      return MBP_TRADE_MASTER;
+
+   return MBP_TRADE_UNKNOWN;
+  }
+
+bool IsGridTradeComment(const string comment)
+  {
+   return (ClassifyTradeComment(comment) == MBP_TRADE_GRID);
+  }
+
+bool IsStackTradeComment(const string comment)
+  {
+   return (ClassifyTradeComment(comment) == MBP_TRADE_STACK);
+  }
+
+bool IsZoneTradeComment(const string comment)
+  {
+   return (ClassifyTradeComment(comment) == MBP_TRADE_ZONE);
+  }
+
+bool IsRecoveryTradeComment(const string comment)
+  {
+   ENUM_MBP_TRADE_TYPE tradeType = ClassifyTradeComment(comment);
+   return (tradeType == MBP_TRADE_GRID ||
+           tradeType == MBP_TRADE_STACK ||
+           tradeType == MBP_TRADE_ZONE);
+  }
+
 string GetManagedAnalysisSymbol(const int index)
   {
    if(index < 0 || index >= ArraySize(SymbolData))
@@ -378,10 +417,10 @@ bool IsNewsTime()
    static ulong _lastCheckTick = 0;
    
    // Only query the database once every 60 seconds (60000 ms)
-   if(GetTickCount() - _lastCheckTick < 60000) 
+   if(GetTickCount64() - _lastCheckTick < 60000) 
       return _cachedResult;
       
-   _lastCheckTick = GetTickCount();
+   _lastCheckTick = GetTickCount64();
    // --- CPU FIX END ---
 
    // CRITICAL: Use Server Time (Real World)
@@ -636,7 +675,7 @@ void SendBridgeSignal(bool isBuy, double volume)
 // 1. Generate Unique Name
    string dir    = isBuy ? "Buy" : "Sell";
 // Use microsecond precision to prevent name collisions during split trades
-   string name   = InpSignalPrefix + "_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount());
+   string name   = InpSignalPrefix + "_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount64());
 
 // 2. Determine Price for Visual Placement
    double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -661,7 +700,7 @@ void SendBridgeClose(bool isBuy)
   {
 // Name format: "Signal_Close_Buy_Time_Tick"
    string dir    = isBuy ? "Buy" : "Sell";
-   string name   = InpSignalPrefix + "_Close_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount());
+   string name   = InpSignalPrefix + "_Close_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount64());
 
 // Create Arrow (using different color for visual clarity, e.g., Gray)
    if(ObjectCreate(0, name, isBuy ? OBJ_ARROW_DOWN : OBJ_ARROW_UP, 0, TimeCurrent(), 0)) // Price 0 is fine, it just needs to exist
@@ -678,7 +717,7 @@ void SendBridgeSL(bool isBuy, double newSL)
   {
 // Name format: "Signal_SL_Buy_Time_Tick"
    string dir    = isBuy ? "Buy" : "Sell";
-   string name   = InpSignalPrefix + "_SL_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount());
+   string name   = InpSignalPrefix + "_SL_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount64());
 
    double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -1905,7 +1944,7 @@ void V3_PumpBridgeService()
 
    static ulong lastHbMs = 0;
    int intervalMs = (InpV3_HeartbeatIntervalMs > 0) ? InpV3_HeartbeatIntervalMs : 1000;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(nowMs - lastHbMs < (ulong)intervalMs) return;
    lastHbMs = nowMs;
 
@@ -2365,9 +2404,9 @@ bool SendBridgeProposal(ulong mockTicket, double lots, int type, string sym, dou
    prop.lots       = lots;
    prop.type       = type;
    prop.action     = 10;         // 10 = Proposal Request
-   prop.time_msc   = GetTickCount();
+   prop.time_msc   = (long)GetTickCount64();
    prop.risk_money = riskMoney;
-   StringToCharArray(sym, prop.symbol);
+   BridgeCopyStringToCharArray(sym, prop.symbol);
 
    string propFile = GetProposalFile(InpHedgeChannel);
    int h = FileOpenRobust(propFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
@@ -2379,7 +2418,7 @@ bool SendBridgeProposal(ulong mockTicket, double lots, int type, string sym, dou
       
       // Lock the Master
       G_HandshakePending = true;
-      G_HandshakeStartTime = GetTickCount();
+      G_HandshakeStartTime = GetTickCount64();
       G_PendingProposalTicket = mockTicket;
       
       Print("🛡️ Handshake sent for ", sym, ". Waiting for slave approval.");

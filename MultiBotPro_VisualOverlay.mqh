@@ -19,7 +19,7 @@ struct SIndicatorOverlayState
    int               maHandles[5];
    int               atrHandle;
    datetime          lastBarTime;
-   uint              lastFullRedrawTick;
+   ulong             lastFullRedrawTick;
 };
 
 enum ENUM_OVERLAY_SERIES
@@ -1165,7 +1165,7 @@ void RefreshIndicatorOverlayForChart(const long chartID,
 
    if(allowFullRedraw && G_IndicatorOverlay.dirty)
    {
-      uint now = GetTickCount();
+      ulong now = GetTickCount64();
       if(now - G_IndicatorOverlay.lastFullRedrawTick >= 250)
       {
          RedrawIndicatorOverlayHistory();

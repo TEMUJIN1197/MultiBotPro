@@ -62,7 +62,7 @@ protected:
       if(!m_tickMirroringEnabled || !allowMirrorDegrade)
          return;
 
-      if(m_tickMirrorFailureCount >= 5 && GetTickCount() < m_tickMirrorRetryAfterMs)
+      if(m_tickMirrorFailureCount >= 5 && GetTickCount64() < m_tickMirrorRetryAfterMs)
          return;
 
       if(tickTimeMsc <= 0)
@@ -88,7 +88,7 @@ protected:
             m_tickMirrorFailureCount++;
             if(m_tickMirrorFailureCount >= 5)
             {
-               m_tickMirrorRetryAfterMs = GetTickCount() + 30000;
+               m_tickMirrorRetryAfterMs = GetTickCount64() + 30000;
                DisableTickMirroring("CustomTicksAdd(live)", err);
             }
          }
