@@ -1,0 +1,41 @@
+﻿{
+  "mode": "hybrid",
+  "sqlite_path": "MultiBotPro_v3.db",
+  "channel": "HEDGE_A",
+  "use_sqlite_bridge": true,
+  "enable_file_fallback": true,
+  "files_dir": "C:\\Users\\Administrator\\AppData\\Roaming\\MetaQuotes\\Terminal\\D0E8209F77C8CF37AD8BF550E51FF075\\MQL5\\Files",
+  "shadowmaster": {
+    "cycle_hours": 6,
+    "lookback_days": 7,
+    "max_workers": 4,
+    "transaction_cost_bps": 2.0,
+    "shadow_config_prefix": "ShadowConfig",
+    "symbols": ["AUDNZD_ATR", "CHFJPY_ATR", "EURGBP_ATR", "USDCAD_ATR"]
+  },
+  "sentiment": {
+    "hybrid": true,
+    "rss_enabled": true,
+    "external_enabled": true,
+    "rss_url": "https://www.investing.com/rss/news_285.rss",
+    "external_url_env": "SHADOW_SENTIMENT_URL"
+  },
+  "service": {
+    "poll_interval_ms": 200,
+    "proposal_timeout_ms": 3000,
+    "max_queue_batch": 200,
+    "heartbeat_interval_ms": 1000,
+    "shadow_sync_interval_s": 2,
+    "db_timeout_s": 5,
+    "busy_timeout_ms": 5000
+  },
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 5073,
+    "max_events": 30,
+    "max_debt_rows": 200
+  }
+}
+
+
+

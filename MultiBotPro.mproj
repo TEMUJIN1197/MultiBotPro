@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Project>
+   <EAName>MultiBotPro</EAName>
+   <Sources>
+      <Source>MultiBotPro.mq5</Source>
+      <Source>hedgeBridge.mqh</Source>
+      <Source>MultiBotPro_Defines.mqh</Source>
+      <Source>MultiBotPro_SlaveRuntime.mqh</Source>
+      <Source>MultiBotPro_SymbolContext.mqh</Source>
+      <Source>MultiBotPro_BundleHelpers.mqh</Source>
+      <Source>MultiBotPro_Dashboard.mqh</Source>
+      <Source>MultiBotPro_Helpers.mqh</Source>
+      <Source>MultiBotPro_Indicators.mqh</Source>
+      <Source>MultiBotPro_VisualOverlay.mqh</Source>
+      <Source>MultiBotPro_Risk.mqh</Source>
+      <Source>MultiBotPro_TradeEntry.mqh</Source>
+      <Source>MultiBotPro_GridZone_State.mqh</Source>
+      <Source>MultiBotPro_GridZone_Positions.mqh</Source>
+      <Source>MultiBotPro_GridZone_Analysis.mqh</Source>
+      <Source>MultiBotPro_GridZone_Recovery.mqh</Source>
+      <Source>MultiBotPro_GUI.mqh</Source>
+      <Source>MultiBotPro_MasterRuntime.mqh</Source>
+      <Source>MultiBotPro_ChartFactory.mqh</Source>
+      <Source>MultiBotPro_Renko.mqh</Source>
+      <Source>MultiBotPro_HeikenRenko.mqh</Source>
+      <Source>MultiBotPro_HeikenAshi.mqh</Source>
+      <Source>MultiBotPro_CustomTime.mqh</Source>
+      <Source>MultiBotPro_CustomSymbolPublisher.mqh</Source>
+      <Source>MultiBotPro_SystemState.mqh</Source>
+      <Source>MultiBotPro_MessageQueue.mqh</Source>
+      <Source>MultiBotPro_RiskEngine.mqh</Source>
+      <Source>MultiBotPro_BoundsChecking.mqh</Source>
+      <Source>MultiBotPro_SystemTests.mqh</Source>
+      <Source>MultiBotPro_Coordinator.mqh</Source>
+   </Sources>
+</Project>

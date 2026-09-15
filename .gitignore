@@ -1,0 +1,19 @@
+.tools/
+accel_new.dll
+
+# Build output & installers
+build/
+Output/
+PackageStage/
+S/
+*.log
+*.bak
+*.bak.*
+compile.log
+
+# Databases & local runtime states
+*.db
+*.db-journal
+
+# Python embedded distribution (PyInstaller uses source ShadowMaster.py)
+PythonApp/WinPython/
