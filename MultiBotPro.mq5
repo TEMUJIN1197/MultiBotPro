@@ -370,6 +370,8 @@ bool MBP_IsSyntheticDataMode(ENUM_MBP_DATA_MODE mode);
 string MBP_DataModeToText(ENUM_MBP_DATA_MODE mode);
 string ResolveManagedAnalysisSymbol(const int symbolIndex);
 bool IsBridgeRuntimeEnabled();
+void MasterProcessBridgeFeedback();
+void MasterPublishBridgeState();
 void SaveFastChartSwitchDashboardState();
 void RestoreFastChartSwitchDashboardState();
 
@@ -7384,6 +7386,95 @@ void ProcessBridgeFeedbackFileBatch(const string feedbackFile, const int maxItem
       FileWriteStruct(hw, pending[i]);
 
    FileClose(hw);
+}
+
+void MasterProcessBridgeFeedback()
+{
+   if(!IsBridgeRuntimeEnabled() || IsParallelWorkerMode())
+      return;
+
+   bool sqliteEnabled = V3_RuntimeEnabled(InpV3_EnableSQLiteBridge, InpV3_SQLitePath);
+   if(sqliteEnabled)
+   {
+      long rowId = -1;
+      HedgeFeedback fb;
+      string note = "";
+      while(V3_SelectPendingFeedbackRow(InpV3_SQLitePath, InpHedgeChannel, rowId, fb, note))
+      {
+         ProcessBridgeFeedbackRecord(fb, note);
+         V3_MarkFeedbackConsumed(InpV3_SQLitePath, rowId);
+      }
+   }
+
+   string feedbackFile = GetFeedbackFile(InpHedgeChannel);
+   if(FileIsExist(feedbackFile, FILE_COMMON))
+   {
+      ProcessBridgeFeedbackFileBatch(feedbackFile, 4);
+   }
+}
+
+void MasterPublishBridgeState()
+{
+   if(!IsBridgeRuntimeEnabled() || IsParallelWorkerMode())
+      return;
+
+   static ulong lastStatePublishMs = 0;
+   ulong nowMs = GetTickCount();
+   if(lastStatePublishMs > 0 && (nowMs - lastStatePublishMs) < 250)
+      return;
+   lastStatePublishMs = nowMs;
+
+   HedgeState state;
+   ZeroMemory(state);
+
+   double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double totalPnL = currentEquity - MasterStartEquity;
+   double dailyPnL = currentEquity - m_day_start_equity;
+   SmartHedge_ReconcileProtectedTrades();
+   SmartHedge_ApplyPnLAdjustments(totalPnL, dailyPnL);
+
+   double slavePnL = 0.0;
+   string slaveFile = GetSlaveFile(InpHedgeChannel);
+   if(FileIsExist(slaveFile, FILE_COMMON))
+   {
+      int hs = FileOpen(slaveFile, FILE_READ|FILE_BIN|FILE_COMMON);
+      if(hs != INVALID_HANDLE)
+      {
+         HedgeState slaveSt;
+         ZeroMemory(slaveSt);
+         FileReadStruct(hs, slaveSt);
+         FileClose(hs);
+         slavePnL = slaveSt.slave_pnl;
+      }
+   }
+
+   state.master_current_equity = currentEquity;
+   state.master_start_equity   = MasterStartEquity;
+   state.master_pnl            = totalPnL;
+   state.master_balance_pnl    = totalPnL;
+   state.master_daily_pnl      = dailyPnL;
+   state.master_target_risk    = EffectiveMasterRisk;
+   state.master_target_profit  = InpMasterTargetProfit;
+   state.master_daily_limit    = InpMasterDailyLoss;
+   state.master_daily_target   = InpMasterDailyProfit;
+   state.slave_target_gain     = InpSlaveGain;
+   state.slave_pnl             = slavePnL;
+   state.is_daily_stopped      = m_daily_stop_hit;
+   state.is_total_stopped      = m_total_stop_hit;
+   state.is_paused             = IsPaused;
+   state.reset_id              = CurrentResetID;
+   state.last_heartbeat        = (ulong)TimeGMT();
+
+   if(InpV3_EnableSQLiteBridge && V3_RuntimeEnabled(InpV3_EnableSQLiteBridge, InpV3_SQLitePath))
+      V3_WriteMasterStateRow(InpV3_SQLitePath, InpHedgeChannel, state);
+
+   string masterFile = GetMasterFile(InpHedgeChannel);
+   int hMaster = FileOpen(masterFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
+   if(hMaster != INVALID_HANDLE)
+   {
+      FileWriteStruct(hMaster, state);
+      FileClose(hMaster);
+   }
 }
 
  //+------------------------------------------------------------------+

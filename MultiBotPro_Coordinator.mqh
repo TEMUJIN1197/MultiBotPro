@@ -266,6 +266,8 @@ private:
    {
       ProcessBridgePendingRequest();
       FlushBridgeSignalQueue();
+      MasterProcessBridgeFeedback();
+      MasterPublishBridgeState();
    }
 
    void PerformMaintenance(ulong timerNowMs)
