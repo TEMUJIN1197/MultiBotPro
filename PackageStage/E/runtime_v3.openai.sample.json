@@ -1,5 +1,13 @@
 {
   "version": "1.1",
+  "runtime_contract": {
+    "name": "MultiBotPro.ShadowMaster",
+    "version": "1.0",
+    "transport": "file-json",
+    "command_file": "MultiBotPro2\\runtime_v3.json",
+    "status_file": "ShadowMasterRuntime.json",
+    "shadow_config_prefix": "ShadowConfig"
+  },
   "sqlite_path": "MultiBotPro_v3.db",
   "shadowmaster": {
     "enabled": true,

@@ -13,6 +13,8 @@ $ShadowMasterSpec = Join-Path $ProjectRoot "build\spec\ShadowMaster.spec"
 $ShadowMasterDistRoot = Join-Path $ProjectRoot "build\dist_shadow"
 $ShadowMasterWorkRoot = Join-Path $ProjectRoot "build\ShadowMaster_rebuild"
 $RebuiltShadowMasterExe = Join-Path $ShadowMasterDistRoot "ShadowMaster.exe"
+$HelperDistRoot = Join-Path $ProjectRoot "build\dist_helpers"
+$HelperWorkRoot = Join-Path $ProjectRoot "build\helpers_rebuild"
 $InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 # Fall back to user-level install location
 if (-not (Test-Path $InnoCompiler)) {
@@ -160,6 +162,51 @@ function Invoke-ShadowMasterRepackage {
     Write-Host ">>> Rebuilt ShadowMaster.exe ready for staging" -ForegroundColor Green
 }
 
+function Invoke-PythonHelperRepackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptName
+    )
+
+    $scriptPath = Join-Path $ProjectRoot "PythonApp\$ScriptName.py"
+    $rebuiltExe = Join-Path $HelperDistRoot "$ScriptName.exe"
+    $workspaceExe = Join-Path $ProjectRoot "PythonApp\$ScriptName.exe"
+    $helperWorkPath = Join-Path $HelperWorkRoot $ScriptName
+
+    if (-not (Test-Path $scriptPath)) {
+        throw "Missing helper source file: $scriptPath"
+    }
+    if (-not (Test-Path $HelperDistRoot)) {
+        New-Item -ItemType Directory -Path $HelperDistRoot | Out-Null
+    }
+    if (Test-Path $rebuiltExe) {
+        Remove-Item -LiteralPath $rebuiltExe -Force
+    }
+
+    $pyInstallerCommand = Resolve-PyInstallerCommand
+    $exe = $pyInstallerCommand[0]
+    $prefixArgs = @()
+    if ($pyInstallerCommand.Count -gt 1) {
+        $prefixArgs = $pyInstallerCommand[1..($pyInstallerCommand.Count - 1)]
+    }
+
+    Write-Host ">>> Repackaging $ScriptName.exe from PythonApp\$ScriptName.py" -ForegroundColor Yellow
+    & $exe @prefixArgs "--noconfirm" "--onefile" "--console" "--name" $ScriptName "--distpath" $HelperDistRoot "--workpath" $helperWorkPath $scriptPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "$ScriptName PyInstaller build failed with exit code $LASTEXITCODE."
+    }
+    if (-not (Test-Path $rebuiltExe)) {
+        throw "$ScriptName PyInstaller build did not produce $rebuiltExe"
+    }
+
+    try {
+        Copy-Item -LiteralPath $rebuiltExe -Destination $workspaceExe -Force
+    }
+    catch {
+        Write-Warning "Could not refresh PythonApp\$ScriptName.exe because it is locked. The installer will still stage the rebuilt EXE from build\dist_helpers."
+    }
+    Write-Host ">>> Rebuilt $ScriptName.exe ready for staging" -ForegroundColor Green
+}
+
 Write-Host ">>> Building self-contained MultiBotPro installer payload" -ForegroundColor Cyan
 
 $requiredWorkspaceFiles = @(
@@ -172,8 +219,8 @@ $requiredWorkspaceFiles = @(
     "sqlite_schema.sql",
     "MultiBotPro_v3.db",
     "PythonApp\ShadowMaster.py",
-    "PythonApp\init_database.exe",
-    "PythonApp\renko_fallback.exe",
+    "PythonApp\init_database.py",
+    "PythonApp\renko_fallback.py",
     "PythonApp\renko_fallback.bmp",
     "PythonApp\README.txt"
 )
@@ -186,6 +233,8 @@ foreach ($relativePath in $requiredWorkspaceFiles) {
 }
 
 Invoke-ShadowMasterRepackage
+Invoke-PythonHelperRepackage -ScriptName "init_database"
+Invoke-PythonHelperRepackage -ScriptName "renko_fallback"
 
 New-CleanDirectory -Path $StageRoot
 New-Item -ItemType Directory -Path $StageExpertsRoot | Out-Null
@@ -205,6 +254,7 @@ Copy-OptionalFile -Source (Join-Path $ProjectRoot "accel.bmp") -DestinationDirec
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "runtime_v3.json") -DestinationDirectory $StageExpertsRoot
 Copy-OptionalFile -Source (Join-Path $ProjectRoot "runtime_v3.openai.sample.json") -DestinationDirectory $StageExpertsRoot
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "sqlite_schema.sql") -DestinationDirectory $StageExpertsRoot
+Copy-RequiredFile -Source (Join-Path $ProjectRoot "MultiBotPro_v3.db") -DestinationDirectory $StageExpertsRoot
 Copy-RequiredFile -Source (Join-Path $ProjectRoot "accel.dll") -DestinationDirectory $StageLibrariesRoot
 
 $workspacePythonRoot = Join-Path $ProjectRoot "PythonApp"
@@ -232,6 +282,8 @@ if (Test-Path $workspacePythonRoot) {
     }
 
     Copy-Item -LiteralPath $RebuiltShadowMasterExe -Destination (Join-Path $stagedPythonRoot "ShadowMaster.exe") -Force
+    Copy-Item -LiteralPath (Join-Path $HelperDistRoot "init_database.exe") -Destination (Join-Path $stagedPythonRoot "init_database.exe") -Force
+    Copy-Item -LiteralPath (Join-Path $HelperDistRoot "renko_fallback.exe") -Destination (Join-Path $stagedPythonRoot "renko_fallback.exe") -Force
 }
 
 $presetPath = Join-Path $Mql5Root "Presets\multibot.set"

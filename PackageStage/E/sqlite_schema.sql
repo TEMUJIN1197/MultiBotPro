@@ -28,5 +28,27 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
     closed_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS worker_status (
+    channel TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    chart_id TEXT NOT NULL,
+    chart_id_hi INTEGER NOT NULL DEFAULT 0,
+    chart_id_lo INTEGER NOT NULL DEFAULT 0,
+    chart_symbol TEXT,
+    symbols_csv TEXT,
+    assignment_signature TEXT,
+    state TEXT NOT NULL,
+    linked_positions INTEGER NOT NULL DEFAULT 0,
+    heartbeat INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(channel, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_status_channel_symbol
+    ON worker_status(channel, symbol);
+
+CREATE INDEX IF NOT EXISTS idx_worker_status_channel_updated
+    ON worker_status(channel, updated_at);
+
 INSERT OR IGNORE INTO system_state (key, value) VALUES ('version', '1.0');
 INSERT OR IGNORE INTO system_state (key, value) VALUES ('engine_status', 'READY');
