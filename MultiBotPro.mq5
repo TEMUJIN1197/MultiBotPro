@@ -5726,8 +5726,14 @@ int Master_OnInit()
       SymbolData[i].BoxHistoryWarmupLastTotalBars = 0;
    }
 
-   if(!InitializeMasterAnalysisEngine())
-      return INIT_FAILED;
+   // Coordinator and standalone master own the analysis engine. Worker charts
+   // are execution-only runtimes and must not initialize a second master engine
+   // or compete for shared ShadowMaster/chart state.
+   if(!IsParallelWorkerMode())
+   {
+      if(!InitializeMasterAnalysisEngine())
+         return INIT_FAILED;
+   }
 
    int activeSymbolsInitialized = 0;
    for(int i = 0; i < TradingSymbolsCount; i++)

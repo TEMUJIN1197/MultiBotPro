@@ -319,7 +319,16 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
     
     string analysisSymbol = baseSymbol;
     bool usesSyntheticChart = MBP_IsSyntheticDataMode(SymbolData[index].DataMode);
-    bool lightweightCoordinator = IsParallelCoordinatorMode();
+    bool lightweightCoordinator = (IsParallelCoordinatorMode() || IsParallelWorkerMode());
+    if(IsParallelWorkerMode())
+    {
+       // The coordinator owns synthetic chart creation. A worker attaches to
+       // its assigned chart and must never open/close duplicate generated charts.
+       analysisSymbol = G_RuntimeAssignedChartSymbol;
+       if(analysisSymbol == "")
+          analysisSymbol = ChartSymbol(0);
+       usesSyntheticChart = false;
+    }
     if(usesSyntheticChart && !lightweightCoordinator)
     {
        if(!PrepareSymbolStartupChart(index, SymbolData[index].DataMode, analysisSymbol))

@@ -1,4 +1,4 @@
-﻿#ifndef __MULTIBOTPRO_MASTERRUNTIME_MQH__
+#ifndef __MULTIBOTPRO_MASTERRUNTIME_MQH__
 #define __MULTIBOTPRO_MASTERRUNTIME_MQH__
 
 //+------------------------------------------------------------------+
@@ -823,6 +823,11 @@ void ShutdownMasterRuntime()
 
 int Master_OnInit_Runtime()
 {
+   // Worker charts are execution-only children of a coordinator. They must
+   // never enter the standalone/coordinator master initializer.
+   if(IsParallelWorkerMode())
+      return INIT_SUCCEEDED;
+
    if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiBrain(), " Initializing Master Runtime...");
    G_MasterHostChartID = ChartID();
    ScheduleMasterHostVisibilityHeal(10000);
