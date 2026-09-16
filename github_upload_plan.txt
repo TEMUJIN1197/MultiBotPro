@@ -1,0 +1,3 @@
+GitHub target: https://github.com/TEMUJIN1197/MultiBotPro/tree/f882b08c4b32a5d9b74177cf3794607408dfa83c
+
+The requested publication will include source code plus compiled/runtime artifacts. Before publishing, the coordinator heartbeat/IPC fix must be compiled and verified, then the repository snapshot will be committed to the target repository/branch or commit-derived branch.
