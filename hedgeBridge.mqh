@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //| Canonical hedge bridge include                                   |
 //+------------------------------------------------------------------+
 #ifndef __MBP_CANONICAL_HEDGEBRIDGE_MQH__
@@ -160,8 +160,28 @@ bool V3_SqliteBackoffActive()
    return true;
 }
 
+static int g_V3_CachedDbHandle = INVALID_HANDLE;
+static string g_V3_CachedDbPath = "";
+
+void V3_CloseCachedDatabase()
+{
+   if(g_V3_CachedDbHandle != INVALID_HANDLE)
+   {
+      DatabaseClose(g_V3_CachedDbHandle);
+      g_V3_CachedDbHandle = INVALID_HANDLE;
+      g_V3_CachedDbPath = "";
+   }
+}
+
+void V3_ReleaseDatabase(const int db)
+{
+   if(db != INVALID_HANDLE && db != g_V3_CachedDbHandle)
+      DatabaseClose(db);
+}
+
 void V3_RegisterSqliteFailure(const string stage)
 {
+   V3_CloseCachedDatabase();
    g_V3_SqliteBackoffUntilMs = GetTickCount() + (ulong)V3_SQLITE_BACKOFF_MS;
 
    datetime now = TimeCurrent();
@@ -293,6 +313,9 @@ string V3_ExtractJSONValue(string json, string key)
 int V3_OpenRuntimeDatabase(const string sqlitePath, const bool createIfMissing = true)
 {
    string dbName = V3_GetDbFileName(sqlitePath);
+   if(g_V3_CachedDbHandle != INVALID_HANDLE && g_V3_CachedDbPath == dbName)
+      return g_V3_CachedDbHandle;
+
    int flags = DATABASE_OPEN_READWRITE | DATABASE_OPEN_COMMON;
    if(createIfMissing)
       flags |= DATABASE_OPEN_CREATE;
@@ -301,12 +324,12 @@ int V3_OpenRuntimeDatabase(const string sqlitePath, const bool createIfMissing =
    if(db == INVALID_HANDLE)
       return INVALID_HANDLE;
 
-   if(!V3_DatabaseExecuteWithRetry(db, "PRAGMA busy_timeout = 5000"))
-   {
-      DatabaseClose(db);
-      return INVALID_HANDLE;
-   }
+   V3_DatabaseExecuteWithRetry(db, "PRAGMA journal_mode = WAL");
+   V3_DatabaseExecuteWithRetry(db, "PRAGMA synchronous = NORMAL");
+   V3_DatabaseExecuteWithRetry(db, "PRAGMA busy_timeout = 3000");
 
+   g_V3_CachedDbHandle = db;
+   g_V3_CachedDbPath = dbName;
    return db;
 }
 
@@ -314,7 +337,8 @@ bool V3_TableExists(const int db, const string tableName)
 {
    string query = StringFormat("SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower('%s') LIMIT 1",
                                V3_SqlEscape(tableName));
-   int stmt = V3_DatabasePrepareWithRetry(db, query);
+   ResetLastError();
+   int stmt = DatabasePrepare(db, query);
    bool exists = false;
    if(stmt != INVALID_HANDLE)
    {
@@ -326,7 +350,8 @@ bool V3_TableExists(const int db, const string tableName)
 
 bool V3_TableHasColumn(const int db, const string tableName, const string columnName)
 {
-   int stmt = V3_DatabasePrepareWithRetry(db, StringFormat("PRAGMA table_info(%s)", tableName));
+   ResetLastError();
+   int stmt = DatabasePrepare(db, StringFormat("PRAGMA table_info(%s)", tableName));
    bool found = false;
    if(stmt != INVALID_HANDLE)
    {
@@ -368,40 +393,40 @@ bool V3_EnsureRuntimeSchema(const string sqlitePath)
    if(db == INVALID_HANDLE)
       return false;
 
-   bool ok = true;
-   bool migratedLegacySignals = false;
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "PRAGMA journal_mode = WAL");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "PRAGMA synchronous = NORMAL");
-   ok = ok && V3_MigrateLegacySignalsTable(db, migratedLegacySignals);
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, ticket INTEGER, symbol TEXT, action INTEGER, type INTEGER NOT NULL DEFAULT 0, lots REAL, sl_dist_points REAL, tp_dist_points REAL, risk_money REAL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), processed INTEGER NOT NULL DEFAULT 0)");
-   if(ok && !V3_TableHasColumn(db, "signals", "type"))
-      ok = ok && V3_DatabaseExecuteWithRetry(db, "ALTER TABLE signals ADD COLUMN type INTEGER NOT NULL DEFAULT 0");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_signals_channel_processed ON signals(channel, processed, id)");
-   if(ok && migratedLegacySignals && V3_TableExists(db, "signals_legacy"))
-   {
-      ok = ok && V3_DatabaseExecuteWithRetry(db, "INSERT INTO signals(channel, ticket, symbol, action, type, lots, sl_dist_points, tp_dist_points, risk_money, payload_json, created_at, processed) SELECT 'legacy', ticket, symbol, action, 0, lots, sl_dist_points, tp_dist_points, risk_money, '', datetime('now'), 1 FROM signals_legacy");
-   }
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_proposals_channel_state ON proposals(channel, state, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS replies (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, action INTEGER NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_replies_channel_request ON replies(channel, request_id, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, master_ticket INTEGER, action INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), consumed INTEGER NOT NULL DEFAULT 0)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_feedback_channel_consumed ON feedback(channel, consumed, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS state_master (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_state_master_channel ON state_master(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS state_slave (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_state_slave_channel ON state_slave(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_events_channel ON events(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS debt_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, symbol TEXT NOT NULL, event_type TEXT NOT NULL, delta_amount REAL NOT NULL, pruning_balance REAL NOT NULL, critical_balance REAL NOT NULL, metadata_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_debt_ledger_channel ON debt_ledger(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS shadow_params (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, payload_json TEXT NOT NULL, score REAL, updated_at TEXT NOT NULL)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_shadow_params_symbol ON shadow_params(symbol, updated_at)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS worker_status (channel TEXT NOT NULL, symbol TEXT NOT NULL, chart_id TEXT NOT NULL, chart_id_hi INTEGER NOT NULL DEFAULT 0, chart_id_lo INTEGER NOT NULL DEFAULT 0, chart_symbol TEXT, symbols_csv TEXT, assignment_signature TEXT, state TEXT NOT NULL, linked_positions INTEGER NOT NULL DEFAULT 0, heartbeat INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(channel, symbol))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_symbol ON worker_status(channel, symbol)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_updated ON worker_status(channel, updated_at)");
+   // Execute table creations directly and independently so any failure does not cascade
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, ticket INTEGER, symbol TEXT, action INTEGER, type INTEGER NOT NULL DEFAULT 0, lots REAL, sl_dist_points REAL, tp_dist_points REAL, risk_money REAL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), processed INTEGER NOT NULL DEFAULT 0);");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_signals_channel_processed ON signals(channel, processed, id);");
 
-   DatabaseClose(db);
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT);");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_proposals_channel_state ON proposals(channel, state, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS replies (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, action INTEGER NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_replies_channel_request ON replies(channel, request_id, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, master_ticket INTEGER, action INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), consumed INTEGER NOT NULL DEFAULT 0);");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_feedback_channel_consumed ON feedback(channel, consumed, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS state_master (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_state_master_channel ON state_master(channel, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS state_slave (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_state_slave_channel ON state_slave(channel, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_events_channel ON events(channel, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS debt_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, symbol TEXT NOT NULL, event_type TEXT NOT NULL, delta_amount REAL NOT NULL, pruning_balance REAL NOT NULL, critical_balance REAL NOT NULL, metadata_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_debt_ledger_channel ON debt_ledger(channel, id);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS shadow_params (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, payload_json TEXT NOT NULL, score REAL, updated_at TEXT NOT NULL);");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_shadow_params_symbol ON shadow_params(symbol, updated_at);");
+
+   DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS worker_status (channel TEXT NOT NULL, symbol TEXT NOT NULL, chart_id TEXT NOT NULL, chart_id_hi INTEGER NOT NULL DEFAULT 0, chart_id_lo INTEGER NOT NULL DEFAULT 0, chart_symbol TEXT, symbols_csv TEXT, assignment_signature TEXT, state TEXT NOT NULL, linked_positions INTEGER NOT NULL DEFAULT 0, heartbeat INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(channel, symbol));");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_symbol ON worker_status(channel, symbol);");
+   DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_updated ON worker_status(channel, updated_at);");
+
+   bool ok = V3_TableExists(db, "worker_status");
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -423,6 +448,19 @@ bool V3_UpsertWorkerStatus(const string sqlitePath,
    if(db == INVALID_HANDLE)
       return false;
 
+   if(!V3_TableExists(db, "worker_status"))
+   {
+      DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS worker_status (channel TEXT NOT NULL, symbol TEXT NOT NULL, chart_id TEXT NOT NULL, chart_id_hi INTEGER NOT NULL DEFAULT 0, chart_id_lo INTEGER NOT NULL DEFAULT 0, chart_symbol TEXT, symbols_csv TEXT, assignment_signature TEXT, state TEXT NOT NULL, linked_positions INTEGER NOT NULL DEFAULT 0, heartbeat INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(channel, symbol));");
+      DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_symbol ON worker_status(channel, symbol);");
+      DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_updated ON worker_status(channel, updated_at);");
+   }
+
+   if(!V3_TableExists(db, "worker_status"))
+   {
+      V3_ReleaseDatabase(db);
+      return false;
+   }
+
    long chartHigh = chartId / 1000000;
    long chartLow = chartId - (chartHigh * 1000000);
    string query = StringFormat("INSERT OR REPLACE INTO worker_status(channel, symbol, chart_id, chart_id_hi, chart_id_lo, chart_symbol, symbols_csv, assignment_signature, state, linked_positions, heartbeat, updated_at) VALUES('%s','%s','%I64d',%I64d,%I64d,'%s','%s','%s','%s',%d,%d,'%s')",
@@ -439,7 +477,7 @@ bool V3_UpsertWorkerStatus(const string sqlitePath,
                                (int)heartbeat,
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -465,13 +503,26 @@ bool V3_ReadWorkerStatus(const string sqlitePath,
    if(db == INVALID_HANDLE)
       return false;
 
+   if(!V3_TableExists(db, "worker_status"))
+   {
+      DatabaseExecute(db, "CREATE TABLE IF NOT EXISTS worker_status (channel TEXT NOT NULL, symbol TEXT NOT NULL, chart_id TEXT NOT NULL, chart_id_hi INTEGER NOT NULL DEFAULT 0, chart_id_lo INTEGER NOT NULL DEFAULT 0, chart_symbol TEXT, symbols_csv TEXT, assignment_signature TEXT, state TEXT NOT NULL, linked_positions INTEGER NOT NULL DEFAULT 0, heartbeat INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(channel, symbol));");
+      DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_symbol ON worker_status(channel, symbol);");
+      DatabaseExecute(db, "CREATE INDEX IF NOT EXISTS idx_worker_status_channel_updated ON worker_status(channel, updated_at);");
+   }
+
+   if(!V3_TableExists(db, "worker_status"))
+   {
+      V3_ReleaseDatabase(db);
+      return false;
+   }
+
    string query = StringFormat("SELECT heartbeat, chart_id, chart_id_hi, chart_id_lo, symbols_csv, assignment_signature, state FROM worker_status WHERE channel='%s' AND symbol='%s' LIMIT 1",
                                V3_SqlEscape(channel),
                                V3_SqlEscape(symbol));
    int stmt = V3_DatabasePrepareWithRetry(db, query);
    if(stmt == INVALID_HANDLE)
    {
-      DatabaseClose(db);
+      V3_ReleaseDatabase(db);
       return false;
    }
 
@@ -494,7 +545,7 @@ bool V3_ReadWorkerStatus(const string sqlitePath,
    }
 
    DatabaseFinalize(stmt);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -510,6 +561,12 @@ bool V3_DeleteWorkerStatus(const string sqlitePath,
    if(db == INVALID_HANDLE)
       return false;
 
+   if(!V3_TableExists(db, "worker_status"))
+   {
+      V3_ReleaseDatabase(db);
+      return true;
+   }
+
    string filter = StringFormat("channel='%s' AND symbol='%s'",
                                 V3_SqlEscape(channel),
                                 V3_SqlEscape(symbol));
@@ -517,7 +574,7 @@ bool V3_DeleteWorkerStatus(const string sqlitePath,
       filter += StringFormat(" AND chart_id='%I64d'", chartId);
 
    bool ok = V3_DatabaseExecuteWithRetry(db, "DELETE FROM worker_status WHERE " + filter);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -708,7 +765,7 @@ bool V3_InsertEventRow(const string sqlitePath, const string channel, const stri
                                V3_SqlEscape(payloadJson),
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -725,7 +782,7 @@ bool V3_WriteStateRow(const string sqlitePath, const string tableName, const str
                                           V3_SqlEscape(payloadJson),
                                           V3_NowIso()));
 
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -765,7 +822,7 @@ bool V3_ReadLatestStatePayload(const string sqlitePath, const string tableName, 
       DatabaseFinalize(stmt);
    }
 
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return found;
 }
 
@@ -798,7 +855,7 @@ bool V3_InsertSignalRow(const string sqlitePath, const string channel, HedgeSign
                                V3_SqlEscape(payload),
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -856,7 +913,7 @@ bool V3_SelectPendingSignalRow(const string sqlitePath, const string channel, lo
       DatabaseFinalize(stmt);
    }
 
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return found;
 }
 
@@ -866,7 +923,7 @@ bool V3_MarkSignalProcessed(const string sqlitePath, const long rowId)
    if(db == INVALID_HANDLE)
       return false;
    bool ok = V3_DatabaseExecuteWithRetry(db, StringFormat("UPDATE signals SET processed=1 WHERE id=%I64d", rowId));
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -884,7 +941,7 @@ bool V3_InsertProposalRow(const string sqlitePath, const string channel, const s
                                V3_NowIso(),
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -918,7 +975,7 @@ bool V3_SelectPendingProposalRow(const string sqlitePath, const string channel, 
       DatabaseFinalize(stmt);
    }
 
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return found;
 }
 
@@ -928,7 +985,7 @@ bool V3_UpdateProposalState(const string sqlitePath, const long rowId, const str
    if(db == INVALID_HANDLE)
       return false;
    bool ok = V3_DatabaseExecuteWithRetry(db, StringFormat("UPDATE proposals SET state='%s', updated_at='%s' WHERE id=%I64d", V3_SqlEscape(state), V3_NowIso(), rowId));
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -944,7 +1001,7 @@ bool V3_InsertReplyRow(const string sqlitePath, const string channel, const stri
                                V3_SqlEscape(payloadJson),
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -976,7 +1033,7 @@ bool V3_SelectReplyRow(const string sqlitePath, const string channel, const stri
       }
       DatabaseFinalize(stmt);
    }
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return found;
 }
 
@@ -986,7 +1043,7 @@ bool V3_DeleteReplyRow(const string sqlitePath, const long rowId)
    if(db == INVALID_HANDLE)
       return false;
    bool ok = V3_DatabaseExecuteWithRetry(db, StringFormat("DELETE FROM replies WHERE id=%I64d", rowId));
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -1002,7 +1059,7 @@ bool V3_InsertFeedbackRow(const string sqlitePath, const string channel, const u
                                V3_SqlEscape(note),
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -1037,7 +1094,7 @@ bool V3_SelectPendingFeedbackRow(const string sqlitePath, const string channel, 
       }
       DatabaseFinalize(stmt);
    }
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return found;
 }
 
@@ -1047,7 +1104,7 @@ bool V3_MarkFeedbackConsumed(const string sqlitePath, const long rowId)
    if(db == INVALID_HANDLE)
       return false;
    bool ok = V3_DatabaseExecuteWithRetry(db, StringFormat("UPDATE feedback SET consumed=1 WHERE id=%I64d", rowId));
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 
@@ -1074,7 +1131,7 @@ bool V3_InsertDebtLedgerRow(const string sqlitePath,
                                V3_SqlEscape(metadataJson),
                                V3_NowIso());
    bool ok = V3_DatabaseExecuteWithRetry(db, query);
-   DatabaseClose(db);
+   V3_ReleaseDatabase(db);
    return ok;
 }
 

@@ -1146,7 +1146,7 @@ void UpdateBoxLevelsForChart(int symbolIndex,
    datetime drawStartL = iTime(symbol, sourcePeriod, historyDepth);
    int segCountH = 0;
    int segCountL = 0;
-   bool drawOnChart = (chartID >= 0);
+   bool drawOnChart = (chartID > 0) || (chartID == 0 && (symbol == _Symbol || GetBaseSymbol(symbol) == _Symbol));
 
    // =================================================================
    // 1. MAIN LOGIC LOOP (PAST -> PRESENT -> LIVE)
@@ -1219,12 +1219,14 @@ void UpdateBoxLevelsForChart(int symbolIndex,
          if(activeHighLine != drawHighVal || i == 0)
          {
             datetime endTime = (i == 0) ? (currTime + periodSeconds) : currTime;
+            string segNameH = (i == 0) ? "BoxSeg_H_Live" : ("BoxSeg_H_" + IntegerToString((long)drawStartH));
             
-            DrawSteplineSegmentOnChart(chartID, "BoxSeg_H_" + IntegerToString(segCountH), drawStartH, endTime, drawHighVal, BoxLines_ColorHigh);
+            DrawSteplineSegmentOnChart(chartID, segNameH, drawStartH, endTime, drawHighVal, BoxLines_ColorHigh);
             
             if(activeHighLine != drawHighVal)
             {
-               DrawVerticalSegmentOnChart(chartID, "BoxVert_H_" + IntegerToString(segCountH), currTime, drawHighVal, activeHighLine, BoxLines_ColorHigh);
+               string vertNameH = "BoxVert_H_" + IntegerToString((long)currTime);
+               DrawVerticalSegmentOnChart(chartID, vertNameH, currTime, drawHighVal, activeHighLine, BoxLines_ColorHigh);
                drawHighVal = activeHighLine;
                drawStartH  = currTime;
                segCountH++;
@@ -1236,14 +1238,18 @@ void UpdateBoxLevelsForChart(int symbolIndex,
          if(activeLowLine != drawLowVal || i == 0)
          {
             datetime endTime = (i == 0) ? (currTime + periodSeconds) : currTime;
+            string segNameL = (i == 0) ? "BoxSeg_L_Live" : ("BoxSeg_L_" + IntegerToString((long)drawStartL));
             
             if(drawLowVal < 999999) 
-               DrawSteplineSegmentOnChart(chartID, "BoxSeg_L_" + IntegerToString(segCountL), drawStartL, endTime, drawLowVal, BoxLines_ColorLow);
+               DrawSteplineSegmentOnChart(chartID, segNameL, drawStartL, endTime, drawLowVal, BoxLines_ColorLow);
             
             if(activeLowLine != drawLowVal)
             {
                if(drawLowVal < 999999 && activeLowLine < 999999)
-                  DrawVerticalSegmentOnChart(chartID, "BoxVert_L_" + IntegerToString(segCountL), currTime, drawLowVal, activeLowLine, BoxLines_ColorLow);
+               {
+                  string vertNameL = "BoxVert_L_" + IntegerToString((long)currTime);
+                  DrawVerticalSegmentOnChart(chartID, vertNameL, currTime, drawLowVal, activeLowLine, BoxLines_ColorLow);
+               }
                
                drawLowVal = activeLowLine;
                drawStartL = currTime;
@@ -1298,7 +1304,7 @@ void UpdateBoxLevelsForChart(int symbolIndex,
    {
       ObjectDelete(chartID, "BoxLine_H_Live");
       ObjectDelete(chartID, "BoxLine_L_Live");
-      ChartRedraw(chartID);
+      RequestChartRedraw(chartID);
    }
 
    SyncSharedSymbolRuntimeToBasketClones(symbolIndex);
@@ -1319,6 +1325,9 @@ void UpdateBoxLevels(int symbolIndex)
 
 void RefreshCurrentChartBoxLines(const bool force = false)
 {
+   if(IsParallelCoordinatorMode())
+      return;
+
    if(G_IS_DEINIT || !ShowBoxLines)
    {
       DeleteBoxObjectsForChart(0);

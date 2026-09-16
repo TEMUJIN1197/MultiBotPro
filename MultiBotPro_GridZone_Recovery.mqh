@@ -352,6 +352,8 @@ void ManageGridPhase2(int symbolIndex, int basketId)
 //+------------------------------------------------------------------+
 void CheckZoneRecovery(int symbolIndex)
   {
+   if(IsBotPaused()) return;
+
   // 1. GLOBAL COOLDOWN BLOCK
    if(IsGlobalCooldownActive()) return;
 
@@ -969,7 +971,7 @@ void EnforceVolumeBalance(int symbolIndex, ENUM_POSITION_TYPE winningDirection)
                if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("Closed adjustment trade: ", smallestTicket, " (", smallestVol, " lots)");
                losingVol -= smallestVol; // Update local tracker
                if(MBP_ShouldAllowBlockingTradeWait("adjustment_close"))
-                  Sleep(100); // Small delay for broker sync
+                  Sleep(15); // Fast delay for broker sync
               }
             else
               {

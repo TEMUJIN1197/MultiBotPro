@@ -427,25 +427,37 @@ void OverlayUpsertTrendSegment(const string name,
 {
    string tooltip = (tooltipText == "") ? name : tooltipText;
    long chartID = GetIndicatorOverlayChartID();
+   if(chartID < 0)
+      return;
 
    if(ObjectFind(chartID, name) < 0)
+   {
       ObjectCreate(chartID, name, OBJ_TREND, 0, time1, price1, time2, price2);
+      ObjectSetInteger(chartID, name, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(chartID, name, OBJPROP_COLOR, lineColor);
+      ObjectSetInteger(chartID, name, OBJPROP_STYLE, lineStyle);
+      ObjectSetInteger(chartID, name, OBJPROP_WIDTH, MathMax(1, lineWidth));
+      ObjectSetInteger(chartID, name, OBJPROP_BACK, false);
+      ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 1);
+      ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
+      ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
+      ObjectSetString(chartID, name, OBJPROP_TOOLTIP, tooltip);
+   }
    else
    {
+      datetime curT1 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 0);
+      double   curP1 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 0);
+      datetime curT2 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 1);
+      double   curP2 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 1);
+      if(curT1 == time1 && curT2 == time2 &&
+         MathAbs(curP1 - price1) < _Point * 0.001 &&
+         MathAbs(curP2 - price2) < _Point * 0.001)
+         return;
+
       ObjectMove(chartID, name, 0, time1, price1);
       ObjectMove(chartID, name, 1, time2, price2);
    }
-
-   ObjectSetInteger(chartID, name, OBJPROP_RAY_RIGHT, false);
-   ObjectSetInteger(chartID, name, OBJPROP_COLOR, lineColor);
-   ObjectSetInteger(chartID, name, OBJPROP_STYLE, lineStyle);
-   ObjectSetInteger(chartID, name, OBJPROP_WIDTH, MathMax(1, lineWidth));
-   ObjectSetInteger(chartID, name, OBJPROP_BACK, false);
-   ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 1);
-   ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
-   ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
-   ObjectSetString(chartID, name, OBJPROP_TOOLTIP, tooltip);
 }
 
 void OverlayUpsertFillSegment(const string name,
@@ -458,6 +470,8 @@ void OverlayUpsertFillSegment(const string name,
 {
    string tooltip = (tooltipText == "") ? name : tooltipText;
    long chartID = GetIndicatorOverlayChartID();
+   if(chartID < 0)
+      return;
 
    if(bottomPrice > topPrice)
    {
@@ -467,23 +481,33 @@ void OverlayUpsertFillSegment(const string name,
    }
 
    if(ObjectFind(chartID, name) < 0)
+   {
       ObjectCreate(chartID, name, OBJ_RECTANGLE, 0, time1, topPrice, time2, bottomPrice);
+      ObjectSetInteger(chartID, name, OBJPROP_COLOR, ColorToARGB(fillColor, 45));
+      ObjectSetInteger(chartID, name, OBJPROP_FILL, true);
+      ObjectSetInteger(chartID, name, OBJPROP_BACK, true);
+      ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 0);
+      ObjectSetInteger(chartID, name, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(chartID, name, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
+      ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
+      ObjectSetString(chartID, name, OBJPROP_TOOLTIP, tooltip);
+   }
    else
    {
+      datetime curT1 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 0);
+      double   curP1 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 0);
+      datetime curT2 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 1);
+      double   curP2 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 1);
+      if(curT1 == time1 && curT2 == time2 &&
+         MathAbs(curP1 - topPrice) < _Point * 0.001 &&
+         MathAbs(curP2 - bottomPrice) < _Point * 0.001)
+         return;
+
       ObjectMove(chartID, name, 0, time1, topPrice);
       ObjectMove(chartID, name, 1, time2, bottomPrice);
    }
-
-   ObjectSetInteger(chartID, name, OBJPROP_COLOR, ColorToARGB(fillColor, 45));
-   ObjectSetInteger(chartID, name, OBJPROP_FILL, true);
-   ObjectSetInteger(chartID, name, OBJPROP_BACK, true);
-   ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 0);
-   ObjectSetInteger(chartID, name, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(chartID, name, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
-   ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
-   ObjectSetString(chartID, name, OBJPROP_TOOLTIP, tooltip);
 }
 
 void OverlayUpdateTextLabel(const string name,
@@ -723,7 +747,7 @@ void DrawOverlaySeriesHistory(const int seriesId,
       if(!OverlayIsDrawableValue(values[shift]) || !OverlayIsDrawableValue(values[shift - 1]))
          continue;
 
-      string name = MBV_PREFIX + "SEG_" + token + "_" + IntegerToString(shift);
+      string name = MBV_PREFIX + "SEG_" + token + "_" + IntegerToString((long)rates[shift].time);
       OverlayUpsertTrendSegment(name,
                                 rates[shift].time,
                                 values[shift],
@@ -761,7 +785,7 @@ void DrawOverlayCloudHistory(const MqlRates &rates[],
 
       double topPrice = MathMax(bufferHigh[shift], bufferHigh[shift - 1]);
       double bottomPrice = MathMin(bufferLow[shift], bufferLow[shift - 1]);
-      string name = MBV_PREFIX + "FILL_" + IntegerToString(shift);
+      string name = MBV_PREFIX + "FILL_" + IntegerToString((long)rates[shift].time);
 
       OverlayUpsertFillSegment(name,
                                rates[shift].time,
@@ -1081,8 +1105,6 @@ void RedrawIndicatorOverlayHistory()
    int leftShift = MathMin(copied - 1, leftVisible + historyMargin);
    int rightShift = MathMax(1, leftVisible - visibleBars - historyMargin);
 
-   DeleteIndicatorOverlayObjects();
-
    double ma1[];
    double ma2[];
    double ma3[];
@@ -1112,8 +1134,27 @@ void RedrawIndicatorOverlayHistory()
    DrawOverlaySeriesHistory(OVERLAY_SERIES_VWAP_LOW, rates, vwapLow, copied, leftShift, rightShift);
    DrawOverlayCloudHistory(rates, vwapHigh, vwapLow, copied, leftShift, rightShift);
 
+   // Smooth in-place redraw: prune only segments that scrolled past visible history margin
+   long currentOverlayChartID = GetIndicatorOverlayChartID();
+   if(currentOverlayChartID >= 0 && leftShift < copied)
+   {
+      datetime oldestAllowed = rates[leftShift].time;
+      int totalObjs = ObjectsTotal(currentOverlayChartID, 0, -1);
+      for(int k = totalObjs - 1; k >= 0; k--)
+      {
+         string objName = ObjectName(currentOverlayChartID, k, 0, -1);
+         if(StringFind(objName, MBV_PREFIX + "SEG_") == 0 || StringFind(objName, MBV_PREFIX + "FILL_") == 0)
+         {
+            datetime objTime = (datetime)ObjectGetInteger(currentOverlayChartID, objName, OBJPROP_TIME, 0);
+            if(objTime > 0 && objTime < oldestAllowed)
+               ObjectDelete(currentOverlayChartID, objName);
+         }
+      }
+   }
+
    UpdateIndicatorOverlayTail();
    UpdateIndicatorOverlayLabels();
+   RequestChartRedraw(currentOverlayChartID);
 }
 
 void RefreshIndicatorOverlayForChart(const long chartID,
@@ -1157,16 +1198,17 @@ void RefreshIndicatorOverlayForChart(const long chartID,
       G_IndicatorOverlay.dirty = true;
    }
 
-   if(currentBarTime != 0 && currentBarTime != G_IndicatorOverlay.lastBarTime)
+   bool isNewBar = (currentBarTime != 0 && currentBarTime != G_IndicatorOverlay.lastBarTime);
+   if(isNewBar)
    {
       G_IndicatorOverlay.lastBarTime = currentBarTime;
       G_IndicatorOverlay.dirty = true;
    }
 
-   if(allowFullRedraw && G_IndicatorOverlay.dirty)
+   if((allowFullRedraw || isNewBar) && G_IndicatorOverlay.dirty)
    {
       uint now = GetTickCount();
-      if(now - G_IndicatorOverlay.lastFullRedrawTick >= 500)
+      if(now - G_IndicatorOverlay.lastFullRedrawTick >= 300)
       {
          RedrawIndicatorOverlayHistory();
          G_IndicatorOverlay.lastFullRedrawTick = now;
@@ -1181,6 +1223,9 @@ void RefreshIndicatorOverlayForChart(const long chartID,
 
 void RefreshIndicatorOverlay(const bool allowFullRedraw)
 {
+   if(IsParallelCoordinatorMode())
+      return;
+
    string chartSymbol = ChartSymbol(0);
    int focusIndex = ResolveDashboardHostFocusSymbolIndex(chartSymbol);
    string focusSymbol = "";

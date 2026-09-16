@@ -170,13 +170,11 @@ $requiredWorkspaceFiles = @(
     "romeo.ico",
     "runtime_v3.json",
     "sqlite_schema.sql",
+    "MultiBotPro_v3.db",
     "PythonApp\ShadowMaster.py",
-    # init_database.exe removed: EA's V3_EnsureRuntimeSchema() (hedgeBridge.mqh:359)
-    # creates every table/index/PRAGMA on first launch, making the standalone .exe
-    # redundant. Schema source of truth is sqlite_schema.sql plus the EA's runtime
-    # CREATE TABLE IF NOT EXISTS statements.
-    # renko_fallback.exe removed: never invoked from MQL5 code. Renko goes through
-    # accel.dll (MBP_RenkoOpenSessionW etc.) or MultiBotPro_Renko.mqh natively.
+    "PythonApp\init_database.exe",
+    "PythonApp\renko_fallback.exe",
+    "PythonApp\renko_fallback.bmp",
     "PythonApp\README.txt"
 )
 
@@ -227,7 +225,6 @@ if (Test-Path $workspacePythonRoot) {
         $_.Name -ne "__pycache__" -and
         $_.Name -ne "logs" -and
         $_.Name -ne "runtime_v3.json" -and
-        $_.Name -notin @("init_database.exe", "init_database.py", "renko_fallback.exe", "renko_fallback.py", "renko_fallback.bmp", "shadowmaster_launcher.py") -and
         $_.Name -notlike "*.bak*" -and
         $_.Extension -notin @(".py", ".pyw", ".pyc", ".pyo", ".spec")
     } | ForEach-Object {

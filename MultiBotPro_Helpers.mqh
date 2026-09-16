@@ -494,26 +494,75 @@ bool IsNewsTime()
   }
   
 //+------------------------------------------------------------------+
-//| Helper: Calculate Commission from History Deals                  |
+//| Helper: Calculate Commission from History Deals (Cached)         |
 //+------------------------------------------------------------------+
+struct SPositionCommissionCacheItem
+{
+   ulong  posId;
+   double commission;
+   ulong  cachedAtMs;
+};
+
+static SPositionCommissionCacheItem g_PosCommCache[];
+
 double GetPositionCommission(ulong pos_id)
-  {
-   double comm = 0;
+{
+   if(pos_id == 0) return 0.0;
+   ulong nowMs = GetTickCount64();
+   int cacheSize = ArraySize(g_PosCommCache);
+   for(int c = 0; c < cacheSize; c++)
+   {
+      if(g_PosCommCache[c].posId == pos_id)
+      {
+         if((nowMs - g_PosCommCache[c].cachedAtMs) < 10000)
+            return g_PosCommCache[c].commission;
+         break;
+      }
+   }
+
+   double comm = 0.0;
    if(HistorySelectByPosition(pos_id))
-     {
+   {
       int total = HistoryDealsTotal();
       for(int i = 0; i < total; i++)
-        {
+      {
          ulong ticket = HistoryDealGetTicket(i);
          if(ticket > 0)
-           {
-            // Sum up commissions (Entry + Exit deals if any)
+         {
             comm += HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-           }
-        }
-     }
+         }
+      }
+   }
+
+   bool updated = false;
+   for(int c = 0; c < cacheSize; c++)
+   {
+      if(g_PosCommCache[c].posId == pos_id)
+      {
+         g_PosCommCache[c].commission = comm;
+         g_PosCommCache[c].cachedAtMs = nowMs;
+         updated = true;
+         break;
+      }
+   }
+   if(!updated)
+   {
+      if(cacheSize >= 256)
+      {
+         for(int c = 0; c < 128; c++)
+            g_PosCommCache[c] = g_PosCommCache[c + 128];
+         ArrayResize(g_PosCommCache, 128, 64);
+         cacheSize = 128;
+      }
+      int next = cacheSize;
+      ArrayResize(g_PosCommCache, next + 1, 64);
+      g_PosCommCache[next].posId = pos_id;
+      g_PosCommCache[next].commission = comm;
+      g_PosCommCache[next].cachedAtMs = nowMs;
+   }
+
    return comm;
-  }
+}
   
 //+------------------------------------------------------------------+
 //| Helper: Force Chart Appearance (Direct Property Set)             |
@@ -777,7 +826,10 @@ void DrawGridLine(string name, double price, color clr)
      }
    else
      {
-      // Update price
+      // Update price only if changed to avoid unnecessary repaint flicker
+      double curPrice = ObjectGetDouble(0, name, OBJPROP_PRICE);
+      if(MathAbs(curPrice - price) < _Point * 0.5)
+         return;
       ObjectMove(0, name, 0, 0, price);
      }
   }
@@ -811,17 +863,17 @@ void DrawSteplineSegmentOnChart(long chartID, string name, datetime time1, datet
      }
    else
      {
+      datetime curT1 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 0);
+      datetime curT2 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 1);
+      double   curP1 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 0);
+      if(curT1 == time1 && curT2 == time2 && MathAbs(curP1 - price) < _Point * 0.001)
+         return;
+
       ObjectMove(chartID, name, 0, time1, price);
       ObjectMove(chartID, name, 1, time2, price);
       ObjectSetInteger(chartID, name, OBJPROP_COLOR, clr);
       ObjectSetInteger(chartID, name, OBJPROP_WIDTH, finalWidth);
       ObjectSetInteger(chartID, name, OBJPROP_STYLE, BoxLines_Style);
-      ObjectSetInteger(chartID, name, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
-      ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(chartID, name, OBJPROP_BACK, false);
-      ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 12);
       ObjectSetString(chartID, name, OBJPROP_TOOLTIP, tooltip);
      }
   }
@@ -856,17 +908,18 @@ void DrawVerticalSegmentOnChart(long chartID, string name, datetime time, double
      }
    else
      {
+      datetime curT1 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 0);
+      datetime curT2 = (datetime)ObjectGetInteger(chartID, name, OBJPROP_TIME, 1);
+      double   curP1 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 0);
+      double   curP2 = ObjectGetDouble(chartID, name, OBJPROP_PRICE, 1);
+      if(curT1 == time && curT2 == time && MathAbs(curP1 - price1) < _Point * 0.001 && MathAbs(curP2 - price2) < _Point * 0.001)
+         return;
+
       ObjectMove(chartID, name, 0, time, price1);
       ObjectMove(chartID, name, 1, time, price2);
       ObjectSetInteger(chartID, name, OBJPROP_COLOR, clr);
       ObjectSetInteger(chartID, name, OBJPROP_WIDTH, finalWidth);
       ObjectSetInteger(chartID, name, OBJPROP_STYLE, BoxLines_Style);
-      ObjectSetInteger(chartID, name, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(chartID, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(chartID, name, OBJPROP_SELECTED, false);
-      ObjectSetInteger(chartID, name, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(chartID, name, OBJPROP_BACK, false);
-      ObjectSetInteger(chartID, name, OBJPROP_ZORDER, 12);
       ObjectSetString(chartID, name, OBJPROP_TOOLTIP, tooltip);
      }
   }
@@ -2718,6 +2771,8 @@ void WipeAllTerminalGlobalVariables()
    for(int i = total - 1; i >= 0; i--)
      {
       string varName = GlobalVariableName(i);
+      if(StringFind(varName, "MBP_COORD_") == 0)
+         continue; // Never delete coordinator IPC communication variables!
       
       // Check if the variable contains any of our bot's prefixes
       for(int p = 0; p < ArraySize(targetPrefixes); p++)

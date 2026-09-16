@@ -30,6 +30,7 @@ int    Panel_FastPts          = 100;        // Modification step fast
 
 // Global Authorization Flags
 bool   G_LicenseValid = false;
+bool   G_LicenseExpiredExplicit = false;
 string G_LicenseMsg   = "Unverified";
 // --- HANDSHAKE STATE LOCKS ---
 bool  G_HandshakePending   = false;
@@ -239,8 +240,9 @@ string G_RuntimeAssignedSymbols[];
 #define MBP_WORKER_TEMPLATE_RETRY_MS     300000
 #define MBP_WORKER_CHART_OPEN_COOLDOWN_MS 300000
 #define MBP_WORKER_ENSURE_INTERVAL_MS    2500
-#define MBP_WORKER_READY_STALE_SEC       45
+#define MBP_WORKER_READY_STALE_SEC       120
 #define MBP_WORKER_GRACE_STALE_SEC       900
+#define MBP_WORKER_HEARTBEAT_TIME_SKEW_SEC 300
 
 #define MBP_UI_COMMAND_QUEUE_CAPACITY 16
 
@@ -348,6 +350,13 @@ string MBP_GetActiveCoordinatorKey();
 bool IsParallelLegacyMode();
 bool IsParallelCoordinatorMode();
 bool IsParallelWorkerMode();
+string MBP_CoordPausedGVName(const string coordinatorKey);
+string MBP_CoordResetGVName(const string coordinatorKey);
+void MBP_SetCoordinatorPaused(const string coordinatorKey, const bool paused);
+void MBP_SetCoordinatorResetting(const string coordinatorKey, const bool resetting);
+bool MBP_IsCoordinatorPaused(const string coordinatorKey);
+bool MBP_IsCoordinatorResetting(const string coordinatorKey);
+bool IsBotPaused();
 string RuntimeRoleToText(const ENUM_MBP_RUNTIME_ROLE role);
 bool ShadowMaster_ShouldOwnRuntime();
 void MasterEnsureRuntimeWorkers();
@@ -383,11 +392,11 @@ void RestoreFastChartSwitchDashboardState();
 // InpEnableCoordinator controls internal coordinator/worker execution topology.
 // Internal worker charts ignore inputs and receive configuration from the coordinator chart.
 
-// === 00. SECURITY & LICENSE ===
+// === 00. Security & License ===
 input group "=== 00. Security & License ==="
 input string InpLicenseKey = "testkey1"; // License key
 
-// === 01. SYMBOLS, TIMEFRAMES & ENTRIES ===
+// === 01. Symbols, Timeframes & Entries ===
 input group "=== 01. Symbols, Timeframes & Entries ==="
 sinput string DIV_SYMBOLS = "--- Traded Symbols ---";
 input string ManualSymbols = "AUDNZD,CHFJPY,EURGBP,USDCAD"; // Manual symbol list
@@ -413,7 +422,7 @@ input bool   ReverseStrategy      = false; // Reverse buy and sell signals
 sinput string DIV_SIGNAL_OPS = "--- Signal Timing ---";
 input bool   InpProcessSignalsPerBar = false; // Process once per bar
 
-// === 01. RUNTIME, DATA & BACKEND ===
+// === 01. Runtime, Data & Backend ===
 input group "=== 01. Runtime, Data & Backend ==="
 input ENUM_BOT_MODE BotSystemMode = BOT_MODE_STANDALONE; // Bot role
 input bool InpEnableCoordinator = false; // Coordinator only; spawn worker EAs
@@ -423,6 +432,7 @@ input ENUM_COMPUTE_BACKEND InpPrimaryComputeBackend = COMPUTE_BACKEND_DLL; // Pr
 input bool InpAutoFailoverToPython = true; // Auto fallback to Python
 input int InpParallelWorkerHeartbeatMs = 1000; // Worker state publish cadence (ms)
 
+// === 00A. Synthetic Chart Engines ===
 input group "=== 00A. Synthetic Chart Engines ==="
 sinput string DIV_DATA_CUSTOM_TIME = "--- Custom Time Bars ---";
 input int    InpCustomTimeValue = 45; // Bar interval value
@@ -473,6 +483,7 @@ input int    InpHeikenRenkoBlockSizePoints = 100; // Block size (points)
 input string InpHeikenRenkoSuffix = "HARenko"; // Custom symbol suffix
 input int    InpHeikenRenkoHistoryDays = 5; // History lookback (days)
 
+// === 00B. Slave Mode ===
 input group "=== 00B. Slave Mode ==="
 sinput string DIV_SLAVE_CORE = "--- Slave Core ---";
 input string Slave_InpChannelName = "HEDGE_A"; // Channel name
@@ -494,6 +505,7 @@ input double Slave_InpEstCommCost = 8.0; // Estimated commission
 input bool   Slave_InpEnableLateStageSingleSymbolLock = false; // Late-stage symbol lock
 input int    Slave_InpMaxConcurrentSymbols = 0; // Max concurrent slave symbols (0 = unlimited)
 
+// === 03. Multi-Basket Entries ===
 input group "=== 03. Multi-Basket Entries ==="
 sinput string DIV_MULTI_BASKET = "--- Basket Controls ---";
 input bool   InpEnableMultiBaskets = false; // Enable multiple baskets
@@ -501,18 +513,20 @@ input int    InpMaxBasketsPerSymbol = 2; // Max baskets per symbol
 input double InpMinBasketDistanceATR = 5.0; // Min ATR spacing between baskets
 input bool   InpAllowOppositeDirectionBaskets = true; // Allow buy and sell baskets together
 
+// === 04. Position Sizing & Risk ===
 input group "=== 04. Position Sizing & Risk ==="
 sinput string DIV_BASE_RISK = "--- Base Risk Settings ---";
 input ENUM_RISK_TYPE RiskType     = RISK_FIXED_MONEY;  // Risk model
-input double RiskPercent          = 2; // Risk percent
+input double RiskPercent          = 2.0; // Risk percent
 input double FixedLot             = 0.01; // Fixed lot size
 input double RiskMoney            = 50.0; // Fixed money risk
 
 sinput string DIV_SAFETY_CAPS = "--- Safety Caps ---";
-input double MaxLotSizePerTrade   = 50; // Max lot per trade
+input double MaxLotSizePerTrade   = 50.0; // Max lot per trade
 input int    MaxSplitTrades       = 10; // Max split orders
 input double MaxSpreadATR         = 0.5; // Max spread (xATR, 0 = off)
 
+// === 05. Exits, Stops & Trailing ===
 input group "=== 05. Exits, Stops & Trailing ==="
 sinput string DIV_SL_MAIN = "--- Stop Loss Core ---";
 input ENUM_SL_TYPE StopLossType   = SL_ATR; // Stop-loss model
@@ -521,12 +535,12 @@ input ENUM_TIMEFRAMES ATR_Timeframe = PERIOD_CURRENT; // Stop-loss ATR timeframe
 sinput string DIV_TP = "--- Take Profit ---";
 input ENUM_TP_TYPE TakeProfitType = TP_ATR; // Take-profit model
 input double TP_Ratio             = 1.5; // Risk/reward ratio
-input double FixedTP              = 100; // Fixed take profit (points)
-input double TP_ATR_Multiplier    = 5; // ATR take-profit multiplier
+input double FixedTP              = 100.0; // Fixed take profit (points)
+input double TP_ATR_Multiplier    = 5.0; // ATR take-profit multiplier
 
 sinput string DIV_SL_ATR = "--- ATR Stop ---";
 input int    ATR_Period           = 100; // ATR period
-input double ATR_Multiplier       = 5; // ATR multiplier
+input double ATR_Multiplier       = 5.0; // ATR multiplier
 
 sinput string DIV_SL_BOX = "--- Box Pivot Stop ---";
 input int    Box_Lookback         = 2; // Pivot lookback
@@ -545,10 +559,11 @@ input int    TrailBox_Levels      = 2; // Trail box levels
 input int    TrailBox_StepLevels  = 1; // Box trail step levels
 input double TrailATR_Multiplier  = 1.5; // Trail ATR multiplier
 input double TrailATR_Update      = 0.5; // Trail step (ATR multiplier)
-input double TrailPoints          = 500; // Trail distance (points)
-input double TrailPointsStep      = 250; // Trail step (points)
+input double TrailPoints          = 500.0; // Trail distance (points)
+input double TrailPointsStep      = 250.0; // Trail step (points)
 input ENUM_LOCK_TRAIL LockTrail   = LOCK_TRAIL_TP_HIT; // Lock trailing until
 
+// === 06. Strategy Filters & Indicators ===
 input group "=== 06. Strategy Filters & Indicators ==="
 sinput string DIV_MA_1 = "--- Moving Average 1 ---";
 input ENUM_MY_MA_SOURCE MA1_Source = MY_SRC_CLOSE; // MA1 source
@@ -590,6 +605,7 @@ input bool   UseBoxTrendFilter    = false; // Enable box trend filter
 input int    BoxTrend_TFs_Count   = 2; // Timeframes to compare
 input bool   BoxTrend_ReqBreakout = false; // Require breakout on lowest timeframe
 
+// === 07. VWAP Strategy ===
 input group "=== 07. VWAP Strategy ==="
 sinput string DIV_VWAP_MAIN = "--- Global VWAP ---";
 input bool   UseVWAP              = false; // Enable VWAP signals
@@ -612,6 +628,7 @@ input ENUM_APPLIED_PRICE VWAP3_PriceSource = PRICE_TYPICAL; // Session VWAP pric
 input int    VWAP3_StartHour      = 9; // Session start hour (NY)
 input int    VWAP3_StartMinute    = 30; // Session start minute (NY)
 
+// === 08. Opening Range Reversal ===
 input group "=== 08. Opening Range Reversal ==="
 sinput string DIV_OR_REVERSAL = "--- Opening Range Reversal ---";
 input bool   UseORReversal        = false; // Enable OR reversal
@@ -619,12 +636,14 @@ input ENUM_TIMEFRAMES OR_EntryTF  = PERIOD_M5; // Entry timeframe
 input int    OR_StartHour         = 9; // Start hour (NY)
 input int    OR_StartMinute       = 30; // Start minute (NY)
 input int    OR_WindowMinutes     = 60; // Trading window (minutes)
-input double OR_ATR_Threshold     = 0.20; // Min range vs daily ATR
+input double OR_ATR_Threshold     = 0.2; // Min range vs daily ATR
 
+// === 09. Sessions, Time & News ===
 input group "=== 09. Sessions, Time & News ==="
 sinput string DIV_SESSION_MAIN = "--- Trading Sessions ---";
 input bool   UseTimeFilter        = false; // Enable session filter
 input bool   CloseTradesOnSessionExit = false; // Close trades when session ends
+
 sinput string DIV_SESS_1 = "--- Session 1 ---";
 input bool   UseSession1          = true; // Enable session 1
 input int    Session1_StartHour   = 8; // Start hour
@@ -682,46 +701,47 @@ input bool   CloseOnNews          = false; // Close positions for news
 
 sinput string DIV_NEWS_VISUAL = "--- News Visuals ---";
 input bool   ShowNewsLines        = true; // Draw news lines
-input color  NewsColorHigh        = clrRed; // High-impact color
-input color  NewsColorMed         = clrOrange; // Medium-impact color
-input color  NewsColorLow         = clrYellow; // Low-impact color
-input color  NewsColorHoliday     = clrWhite; // Holiday color
+input color  NewsColorHigh        = (color)255; // High-impact color
+input color  NewsColorMed         = (color)42495; // Medium-impact color
+input color  NewsColorLow         = (color)65535; // Low-impact color
+input color  NewsColorHoliday     = (color)16777215; // Holiday color
 input ENUM_LINE_STYLE NewsLineStyle = STYLE_DASHDOTDOT; // News line style
 input bool   NewsWindowColorEnable = true; // Tint chart during news window
-input color  NewsWindowColor      = clrMagenta; // News window color
+input color  NewsWindowColor      = (color)16711935; // News window color
 
+// === 10. Recovery, Grid & Stacking ===
 input group "=== 10. Recovery, Grid & Stacking ==="
 sinput string DIV_GRID_CORE = "--- Grid/Zone Core ---";
 input ENUM_RISK_MODE RiskMode     = RISK_MODE_GRID;    // Recovery mode
 input ENUM_GRID_STRATEGY GridStrategy = GRID_STRAT_AGGRESSIVE; // Grid strategy
 input bool   UseDynamicProfitScaling = true;           // Dynamic profit scaling
-input double GridTP_Amount        = 2; // Grid target profit ($)
-input double GridImpulseATR       = 2; // Phase 1 distance (ATR)
-input double GridTransitionDist   = 1; // Phase 2 distance (ATR)
+input double GridTP_Amount        = 2.0; // Grid target profit ($)
+input double GridImpulseATR       = 2.0; // Phase 1 distance (ATR)
+input double GridTransitionDist   = 1.0; // Phase 2 distance (ATR)
 
 sinput string DIV_GRID_AGGR = "--- Aggressive Grid Mode ---";
 input ENUM_GRID_DISTANCE_TYPE GridAggressiveDistType = GRID_DIST_ATR; // Distance unit
-input double GridAggressiveRecovDist = 2; // Base recovery distance
+input double GridAggressiveRecovDist = 2.0; // Base recovery distance
 input double GridAggressiveRecovMult = 1.5; // Distance multiplier
 
 sinput string DIV_GRID_CONS = "--- Conservative Grid Mode ---";
 input ENUM_GRID_DISTANCE_TYPE GridTransitionType = GRID_DIST_ATR; // Transition distance unit
-input double GridStakeMultiplier  = 2; // Stake multiplier per level
+input double GridStakeMultiplier  = 2.0; // Stake multiplier per level
 input int    GridStakeStartLevel  = 1; // Stake start level
-input double GridMaxStake         = 0; // Max stake (0 = no limit)
+input double GridMaxStake         = 0.0; // Max stake (0 = no limit)
 
 sinput string DIV_GRID_DIST = "--- Grid Distances ---";
 input ENUM_GRID_DISTANCE_TYPE GridDistanceType = GRID_DIST_ATR; // Grid spacing unit
-input double GridDistance         = 5; // Base grid spacing
+input double GridDistance         = 5.0; // Base grid spacing
 input double GridMultiplier       = 1.5; // Grid spacing multiplier
 input int    GridDistanceStartLevel = 1; // Distance multiplier start level
-input double MinGridDistance      = 20; // Min grid spacing (points)
-input double MaxGridDistance      = 20000; // Max grid spacing (points)
+input double MinGridDistance      = 20.0; // Min grid spacing (points)
+input double MaxGridDistance      = 20000.0; // Max grid spacing (points)
 
 sinput string DIV_GRID_LOTS = "--- Grid Lot Sizing ---";
 input bool   UseGridLotPerEquity  = false; // Use lot-per-equity model
 input double GridLot_Per_Equity_Size = 0.01; // Lots per balance step
-input double GridLot_Per_Equity_Step = 10000; // Balance step size
+input double GridLot_Per_Equity_Step = 10000.0; // Balance step size
 input ENUM_RISK_TYPE GridRiskType = RISK_FIXED_MONEY; // Fallback risk model
 input double GridRiskPercent      = 0.2; // Fallback risk percent
 input double GridFixedLot         = 0.01; // Fallback fixed lot
@@ -730,29 +750,30 @@ input bool   GridCloseOnTP        = false; // Close grid at target
 
 sinput string DIV_ZONE_RECOV = "--- Zone Recovery ---";
 input ENUM_ZONE_GAP_TYPE ZoneGapType = ZONE_GAP_ATR; // Zone gap unit
-input double ZoneTP_Amount        = 2; // Zone target profit ($)
-input double ZoneGapPoints        = 50; // Zone gap (points)
-input double ZoneGapATR           = 5; // Zone gap (ATR)
-input double ZoneTargetMult       = 2; // Target distance multiplier
-input double ZoneImpulseATR       = 2; // Phase 1 distance (ATR)
-input double ZoneTransitionDist   = 2; // Phase 2 distance (ATR)
+input double ZoneTP_Amount        = 2.0; // Zone target profit ($)
+input double ZoneGapPoints        = 50.0; // Zone gap (points)
+input double ZoneGapATR           = 5.0; // Zone gap (ATR)
+input double ZoneTargetMult       = 2.0; // Target distance multiplier
+input double ZoneImpulseATR       = 2.0; // Phase 1 distance (ATR)
+input double ZoneTransitionDist   = 2.0; // Phase 2 distance (ATR)
 input bool   ZoneCloseOnTP        = false; // Close zone at target
 
 sinput string DIV_DYN_STAKE = "--- Dynamic Staking ---";
 input bool   UseDynamicStake      = false; // Enable dynamic stake sizing
-input double EquityThreshold      = 2; // Equity change threshold (%)
-input double StakeMultiplier      = 2; // Stake multiplier
-input double MaxStakeMultiplier   = 20; // Max stake multiplier
-input double lotCap               = 50; // Lot cap multiplier
+input double EquityThreshold      = 2.0; // Equity change threshold (%)
+input double StakeMultiplier      = 2.0; // Stake multiplier
+input double MaxStakeMultiplier   = 20.0; // Max stake multiplier
+input double lotCap               = 50.0; // Lot cap multiplier
 
 sinput string DIV_STACK_MODE = "--- Stack Mode ---";
 input bool   StackMode            = true; // Enable stack mode
 input int    StackStart           = 1; // Stack start level
-input double StackInitial         = 1; // Initial stack multiplier
+input double StackInitial         = 1.0; // Initial stack multiplier
 input double StackBoost           = 0.25; // Stack boost per level
 input double MinStackMultiplier   = 0.1; // Min stack multiplier
-input double MaxStackMultiplier   = 64; // Max stack multiplier
+input double MaxStackMultiplier   = 64.0; // Max stack multiplier
 
+// === 11. Grid Pruning (FIFO) ===
 input group "=== 11. Grid Pruning (FIFO) ==="
 sinput string DIV_PRUNE_CORE = "--- Pruning Engine ---";
 input bool   UseGridPruning       = false; // Enable pruning
@@ -761,30 +782,32 @@ input int    PruningLevel         = 5; // Start pruning after level
 input bool   UsePruningRecovery   = false; // Recover pruned losses
 input double PruningRecovPercent  = 25.0; // Recovery percent per cycle
 
+// === 12. Circuit Breakers & Limits ===
 input group "=== 12. Circuit Breakers & Limits ==="
 sinput string DIV_PERF_FILTER = "--- Performance Breakers ---";
 input ENUM_FILTER_RESET FilterResetMode = FILTER_RESET_DAILY; // Counter reset mode
-input int    Filter_MaxOpenTrades = 0; // Max open trades
-input bool   Filter_GlobalTradeCount = true; // Use global trade count
+input int    Filter_MaxOpenTrades = 2; // Max open trades
+input bool   Filter_GlobalTradeCount = false; // Use global trade count
 input bool   InpGridZoneRecycleSmallestAtMaxTrades = false; // Grid/zone: close smallest sequence trade when max open trades is reached
 input int    Filter_MaxWins       = 0; // Max wins
 input int    Filter_MaxLosses     = 0; // Max losses
 input int    Filter_MaxWinStreak  = 0; // Max win streak
 input int    Filter_MaxLossStreak = 0; // Max loss streak
-input double Filter_MaxPctLoss    = 0; // Max session loss (%)
-input double Filter_MaxPctGain    = 0; // Max session gain (%)
+input double Filter_MaxPctLoss    = 0.0; // Max session loss (%)
+input double Filter_MaxPctGain    = 0.0; // Max session gain (%)
 input int    Filter_BlockWins     = 0; // Max wins per block
 input int    Filter_BlockLosses   = 0; // Max losses per block
 
 sinput string DIV_MONEY_LIMITS = "--- Hard Money Limits ---";
-input double GlobalTP_Amount      = 0; // Global take profit ($)
-input double GlobalSL_Amount      = 0; // Global stop loss ($)
+input double GlobalTP_Amount      = 0.0; // Global take profit ($)
+input double GlobalSL_Amount      = 0.0; // Global stop loss ($)
 input bool   UseAccountLimits     = true; // Enable equity limits
-input double AccountProfitLimitPct = 1; // Account profit cap (%)
+input double AccountProfitLimitPct = 1.0; // Account profit cap (%)
 input double AccountLossLimitPct  = 2.5; // Account loss cap (%)
 input bool   RestartAfterLimit    = true; // Restart after limit hit
 input int    AccountLimitCooldownMinutes = 2; // Cooldown (minutes)
 
+// === 13. Engine, Bridge & Integrations ===
 input group "=== 13. Engine, Bridge & Integrations ==="
 sinput string DIV_OP_MODE = "--- Core Engine ---";
 input ENUM_OP_MODE OperationMode = MODE_MIXED; // Operation mode
@@ -814,6 +837,7 @@ input int    InpV3_SpreadCheckMs = 1000; // Spread check cadence (ms)
 input int    InpV3_HeartbeatIntervalMs = 1000; // Bridge heartbeat (ms)
 input int    InpSlaveMirrorGraceSec = 60; // Slave mirror grace period (s)
 
+// === 13B. Diagnostics ===
 input group "=== 13B. Diagnostics ==="
 sinput string DIV_LOG_TIERS = "--- Journal Print Tiers ---";
 input bool   InpLogCritical = true; // Tier 1: critical/safety/failure prints
@@ -826,7 +850,7 @@ input double   InpMasterRisk       = 1000.0; // Max master risk
 input double   InpMasterTargetProfit = 800.0; // Master target profit
 input double   InpMasterDailyLoss  = 300.0; // Daily loss limit
 input double   InpMasterDailyProfit= 400.0; // Daily profit target
-input double   InpStartingBalance  = 5000; // Starting balance (0 = auto)
+input double   InpStartingBalance  = 5000.0; // Starting balance (0 = auto)
 input double   InpSlaveGain        = 100.0; // Slave gain target
 
 sinput string DIV_HEDGE_TRAIL = "--- Trailing Stop Settings ---";
@@ -839,6 +863,7 @@ input bool   InpEnableShadowMaster = true; // Enable Shadow Master
 input int    InpShadowMasterCycleHours = 6; // Shadow refresh interval (hours)
 input string InpShadowConfigName   = "ShadowConfig"; // Shadow config prefix
 
+// === 14. Visuals, UX & Defensive Filters ===
 input group "=== 14. Visuals, UX & Defensive Filters ==="
 sinput string DIV_DASHBOARD = "--- Dashboard Visuals ---";
 input bool   ShowDashboard        = true; // Show dashboard
@@ -847,8 +872,8 @@ input bool   InpOpaquePanel       = false; // Opaque panel blocks chart objects 
 input int    InpSyntheticPumpIntervalMs = 100; // Synthetic update cadence (ms, 0 = every cycle)
 input bool   ShowBoxLines         = true; // Show box lines
 input int    BoxLines_History     = 200; // Box-line history bars
-input color  BoxLines_ColorHigh   = clrGreen; // High box-line color
-input color  BoxLines_ColorLow    = clrRed; // Low box-line color
+input color  BoxLines_ColorHigh   = (color)32768; // High box-line color
+input color  BoxLines_ColorLow    = (color)255; // Low box-line color
 input int    BoxLines_Width       = 1; // Box-line width
 input ENUM_LINE_STYLE BoxLines_Style = STYLE_DASHDOTDOT; // Box-line style
 
@@ -856,43 +881,43 @@ sinput string DIV_INDICATOR_VISUALS = "--- Indicator Overlays ---";
 input bool   InpShowIndicatorOverlay = true; // Show indicator overlay
 input bool   InpOverlayUseChartSymbol = true; // Overlay source uses chart symbol
 input bool   InpShowMA1Overlay      = false; // Show MA1 overlay
-input color  InpMA1OverlayColor     = clrLime; // MA1 color
+input color  InpMA1OverlayColor     = (color)65280; // MA1 color
 input ENUM_LINE_STYLE InpMA1OverlayStyle = STYLE_SOLID; // MA1 style
 input int    InpMA1OverlayWidth     = 1; // MA1 width
 input bool   InpShowMA2Overlay      = false; // Show MA2 overlay
-input color  InpMA2OverlayColor     = clrGreen; // MA2 color
+input color  InpMA2OverlayColor     = (color)32768; // MA2 color
 input ENUM_LINE_STYLE InpMA2OverlayStyle = STYLE_SOLID; // MA2 style
 input int    InpMA2OverlayWidth     = 1; // MA2 width
 input bool   InpShowMA3Overlay      = true; // Show MA3 overlay
-input color  InpMA3OverlayColor     = clrBlue; // MA3 color
+input color  InpMA3OverlayColor     = (color)16711680; // MA3 color
 input ENUM_LINE_STYLE InpMA3OverlayStyle = STYLE_SOLID; // MA3 style
 input int    InpMA3OverlayWidth     = 1; // MA3 width
 input bool   InpShowMA4Overlay      = true; // Show MA4 overlay
-input color  InpMA4OverlayColor     = clrOliveDrab; // MA4 color
+input color  InpMA4OverlayColor     = (color)2330219; // MA4 color
 input ENUM_LINE_STYLE InpMA4OverlayStyle = STYLE_SOLID; // MA4 style
 input int    InpMA4OverlayWidth     = 2; // MA4 width
 input bool   InpShowMA5Overlay      = false; // Show MA5 overlay
-input color  InpMA5OverlayColor     = clrRed; // MA5 color
+input color  InpMA5OverlayColor     = (color)255; // MA5 color
 input ENUM_LINE_STYLE InpMA5OverlayStyle = STYLE_SOLID; // MA5 style
 input int    InpMA5OverlayWidth     = 2; // MA5 width
 input bool   InpShowVWAP1Overlay    = false; // Show VWAP1 overlay
-input color  InpVWAP1OverlayColor   = clrAqua; // VWAP1 color
+input color  InpVWAP1OverlayColor   = (color)16776960; // VWAP1 color
 input ENUM_LINE_STYLE InpVWAP1OverlayStyle = STYLE_DASHDOT; // VWAP1 style
 input int    InpVWAP1OverlayWidth   = 2; // VWAP1 width
 input bool   InpShowVWAP3Overlay    = true; // Show VWAP3 overlay
-input color  InpVWAP3OverlayColor   = clrGold; // VWAP3 color
+input color  InpVWAP3OverlayColor   = (color)55295; // VWAP3 color
 input ENUM_LINE_STYLE InpVWAP3OverlayStyle = STYLE_SOLID; // VWAP3 style
 input int    InpVWAP3OverlayWidth   = 2; // VWAP3 width
 input bool   InpShowVWAPHighOverlay = true; // Show high VWAP overlay
-input color  InpVWAPHighOverlayColor = clrMagenta; // High VWAP color
+input color  InpVWAPHighOverlayColor = (color)16711935; // High VWAP color
 input ENUM_LINE_STYLE InpVWAPHighOverlayStyle = STYLE_DOT; // High VWAP style
 input int    InpVWAPHighOverlayWidth = 1; // High VWAP width
 input bool   InpShowVWAPLowOverlay  = true; // Show low VWAP overlay
-input color  InpVWAPLowOverlayColor = clrMagenta; // Low VWAP color
+input color  InpVWAPLowOverlayColor = (color)16711935; // Low VWAP color
 input ENUM_LINE_STYLE InpVWAPLowOverlayStyle = STYLE_DOT; // Low VWAP style
 input int    InpVWAPLowOverlayWidth = 1; // Low VWAP width
 input bool   InpShowVWAPCloud       = false; // Show VWAP cloud
-input color  InpVWAPCloudColor      = clrAliceBlue; // VWAP cloud color
+input color  InpVWAPCloudColor      = (color)16775408; // VWAP cloud color
 input bool   InpShowIndicatorOverlayLabels = true; // Show overlay labels
 input int    InpIndicatorOverlayLabelOffsetPts = 100; // Label offset (points)
 input int    InpIndicatorOverlayLabelShiftBars = 3; // Label shift (bars)
@@ -911,8 +936,8 @@ input int    InpVelocityPauseSeconds = 10; // Pause length (seconds)
 sinput string FRACTAL_GRID        = "--- Fractal Elastic Grid ---";
 input bool   InpUseFractalGrid    = true; // Enable fractal grid
 input int    InpHurstPeriod       = 30; // Hurst lookback
-input double InpHurstTrendingThreshold = 0.60; // Trending threshold
-input double InpHurstRangingThreshold  = 0.40; // Ranging threshold
+input double InpHurstTrendingThreshold = 0.6; // Trending threshold
+input double InpHurstRangingThreshold  = 0.4; // Ranging threshold
 input double InpHurstStretchMult  = 1.5; // Trending stretch multiplier
 input double InpHurstContractMult = 0.8; // Ranging contract multiplier
 //+------------------------------------------------------------------+
@@ -1131,13 +1156,30 @@ string ResolveManagedAnalysisSymbol(const int symbolIndex)
    if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
       return "";
 
+   ENUM_MBP_DATA_MODE effectiveMode = SymbolData[symbolIndex].DataMode;
+   if(effectiveMode == MBP_DATA_LIVE)
+      effectiveMode = MBP_EffectiveDataMode();
+
+   string baseSym = SymbolData[symbolIndex].BaseSymbol;
+   if(baseSym == "")
+      baseSym = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(baseSym == "")
+      baseSym = SymbolData[symbolIndex].symbol;
+
+   if(MBP_IsSyntheticDataMode(effectiveMode))
+   {
+      string syntheticSym = ResolveSyntheticChartSymbolName(baseSym, effectiveMode);
+      if(syntheticSym != "")
+         return syntheticSym;
+   }
+
    if(SymbolData[symbolIndex].AnalysisSymbol != "")
       return SymbolData[symbolIndex].AnalysisSymbol;
 
    if(SymbolData[symbolIndex].symbol != "")
       return SymbolData[symbolIndex].symbol;
 
-   return SymbolData[symbolIndex].BaseSymbol;
+   return baseSym;
 }
 
 void SaveFastChartSwitchDashboardState()
@@ -1662,7 +1704,21 @@ int MBP_WorkerHeartbeatAgeSeconds(const datetime heartbeat)
 
 bool MBP_IsWorkerHeartbeatFreshForState(const datetime heartbeat, const string state)
 {
-   int ageSec = MBP_WorkerHeartbeatAgeSeconds(heartbeat);
+   if(heartbeat <= 0)
+      return false;
+
+   datetime now = MBP_RuntimeServerNow();
+   if(now <= 0)
+      return true;
+
+   // A broker/server clock can move backwards or temporarily lag while the worker
+   // continues publishing. Do not reject a future heartbeat as stale; only reject
+   // genuinely old records. The bounded skew also prevents corrupt timestamps from
+   // being treated as permanently fresh.
+   if(heartbeat > now)
+      return ((heartbeat - now) <= MBP_WORKER_HEARTBEAT_TIME_SKEW_SEC);
+
+   int ageSec = (int)(now - heartbeat);
    int maxAgeSec = MBP_IsWorkerHeartbeatGraceState(state) ? MBP_WORKER_GRACE_STALE_SEC : MBP_WORKER_READY_STALE_SEC;
    return (ageSec <= maxAgeSec);
 }
@@ -1736,12 +1792,82 @@ string MBP_CoordOwnerLowGVName(const string coordinatorKey)
    return "MBP_COORD_OWNER_LO_" + coordinatorKey;
 }
 
+string MBP_CoordPausedGVName(const string coordinatorKey)
+{
+   return "MBP_COORD_PAUSED_" + coordinatorKey;
+}
+
+string MBP_CoordResetGVName(const string coordinatorKey)
+{
+   return "MBP_COORD_RESET_" + coordinatorKey;
+}
+
+void MBP_SetCoordinatorPaused(const string coordinatorKey, const bool paused)
+{
+   if(coordinatorKey == "")
+      return;
+
+   GlobalVariableSet(MBP_CoordPausedGVName(coordinatorKey), paused ? 1.0 : 0.0);
+}
+
+void MBP_SetCoordinatorResetting(const string coordinatorKey, const bool resetting)
+{
+   if(coordinatorKey == "")
+      return;
+
+   GlobalVariableSet(MBP_CoordResetGVName(coordinatorKey), resetting ? 1.0 : 0.0);
+}
+
+bool MBP_IsCoordinatorPaused(const string coordinatorKey)
+{
+   if(coordinatorKey == "")
+      return false;
+
+   string gvName = MBP_CoordPausedGVName(coordinatorKey);
+   if(!GlobalVariableCheck(gvName))
+      return false;
+
+   return (GlobalVariableGet(gvName) > 0.5);
+}
+
+bool MBP_IsCoordinatorResetting(const string coordinatorKey)
+{
+   if(coordinatorKey == "")
+      return false;
+
+   string gvName = MBP_CoordResetGVName(coordinatorKey);
+   if(!GlobalVariableCheck(gvName))
+      return false;
+
+   return (GlobalVariableGet(gvName) > 0.5);
+}
+
+bool IsBotPaused()
+{
+   if(IsPaused)
+      return true;
+
+   if(IsParallelWorkerMode() && G_RuntimeCoordinatorKey != "")
+   {
+      if(MBP_IsCoordinatorPaused(G_RuntimeCoordinatorKey) || MBP_IsCoordinatorResetting(G_RuntimeCoordinatorKey))
+         return true;
+   }
+
+   return false;
+}
+
 void MBP_WriteCoordinatorAliveHeartbeat(const string coordinatorKey, const long chartId)
 {
    if(coordinatorKey == "" || chartId <= 0)
       return;
 
-   GlobalVariableSet(MBP_CoordAliveGVName(coordinatorKey), (double)GetTickCount64());
+   static ulong lastCoordHbMs = 0;
+   ulong now = GetTickCount64();
+   if(lastCoordHbMs > 0 && (now - lastCoordHbMs) < 250)
+      return;
+   lastCoordHbMs = now;
+
+   GlobalVariableSet(MBP_CoordAliveGVName(coordinatorKey), (double)now);
 
    // Keep the legacy owner GV for diagnostics, but store an exact split id too:
    // MT5 chart ids exceed double's exact integer range and otherwise round-trip
@@ -1777,12 +1903,14 @@ void MBP_DeleteCoordinatorAliveHeartbeat(const string coordinatorKey)
    if(coordinatorKey == "")
       return;
 
-   string names[4];
+   string names[6];
    names[0] = MBP_CoordAliveGVName(coordinatorKey);
    names[1] = MBP_CoordOwnerGVName(coordinatorKey);
    names[2] = MBP_CoordOwnerHighGVName(coordinatorKey);
    names[3] = MBP_CoordOwnerLowGVName(coordinatorKey);
-   for(int i = 0; i < 4; i++)
+   names[4] = MBP_CoordPausedGVName(coordinatorKey);
+   names[5] = MBP_CoordResetGVName(coordinatorKey);
+   for(int i = 0; i < 6; i++)
       if(GlobalVariableCheck(names[i]))
          GlobalVariableDel(names[i]);
 }
@@ -1842,6 +1970,18 @@ bool MBP_WriteWorkerHeartbeatRecord(const string workerSymbol,
    GlobalVariableSet(globalBase + "_state", (double)MBP_WorkerHeartbeatStateCode(state));
    if(assignmentSignature != "")
       GlobalVariableSet(globalBase + "_sig", (double)MBP_StableStringHash(assignmentSignature));
+
+   static ulong lastWorkerFileWriteMs = 0;
+   static string lastWorkerFileState = "";
+   ulong nowMs = GetTickCount();
+   bool stateChanged = (state != lastWorkerFileState);
+   bool fileCadenceDue = (lastWorkerFileWriteMs == 0 || (nowMs - lastWorkerFileWriteMs) >= 2000);
+
+   if(!stateChanged && !fileCadenceDue)
+      return (sqlitePublished || globalPublished);
+
+   lastWorkerFileWriteMs = nowMs;
+   lastWorkerFileState = state;
 
    int handle = FileOpen(MBP_WorkerHeartbeatFile(workerSymbol, coordinatorKey), FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
    if(handle == INVALID_HANDLE)
@@ -2814,13 +2954,22 @@ bool MBP_ReadWorkerHeartbeat(const string symbol,
    {
       outHeartbeat = globalHeartbeat;
       outChartId = globalChartId;
+      // Global variables are the durable timestamp source, but the heartbeat
+      // file carries the full assignment metadata. Preserve that metadata when
+      // both records belong to the same chart instead of returning a partial
+      // global record that later fails signature/state validation.
       if(fileAssignmentSignature != "" && fileChartId == globalChartId)
          outAssignmentSignature = fileAssignmentSignature;
       else
          outAssignmentSignature = globalAssignmentSignature;
       if(fileSymbolsCsv != "" && fileChartId == globalChartId)
          outSymbolsCsv = fileSymbolsCsv;
-      outState = globalState;
+      else
+         outSymbolsCsv = "";
+      if(fileState != "" && fileChartId == globalChartId)
+         outState = fileState;
+      else
+         outState = globalState;
       return true;
    }
 
@@ -3482,12 +3631,13 @@ bool MasterApplyWorkerTemplateWithRecovery(const long chartId,
       templateName = MBP_WorkerTemplateName();
 
    // Allow newly opened chart a brief moment to settle in MT5 GUI queue
-   for(int attempt = 0; attempt < 3; attempt++)
+   for(int attempt = 0; attempt < 2; attempt++)
    {
       ResetLastError();
       if(ChartApplyTemplate(chartId, templateName))
          return true;
-      Sleep(100);
+      if(attempt < 1)
+         Sleep(25);
    }
 
    int firstErr = _LastError;
@@ -3503,16 +3653,12 @@ bool MasterApplyWorkerTemplateWithRecovery(const long chartId,
    }
 
    templateName = MBP_WorkerTemplateName();
-   for(int attempt = 0; attempt < 3; attempt++)
+   ResetLastError();
+   if(ChartApplyTemplate(chartId, templateName))
    {
-      ResetLastError();
-      if(ChartApplyTemplate(chartId, templateName))
-      {
-         if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiBrain(), " Worker template reapplied after rebuild for ", baseSymbol,
-               " on chart ", chartId, ".");
-         return true;
-      }
-      Sleep(100);
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiBrain(), " Worker template reapplied after rebuild for ", baseSymbol,
+            " on chart ", chartId, ".");
+      return true;
    }
 
    if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Failed to apply rebuilt worker template to ", baseSymbol,
@@ -3673,6 +3819,11 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
                   string assignmentFile = MBP_WorkerAssignmentFile(chartId);
                   if(FileIsExist(assignmentFile, FILE_COMMON))
                      FileDelete(assignmentFile, FILE_COMMON);
+                  string workerHbFile = MBP_WorkerHeartbeatFile(assignedSymbol, coordinatorKey);
+                  if(FileIsExist(workerHbFile, FILE_COMMON))
+                     FileDelete(workerHbFile, FILE_COMMON);
+                  if(InpV3_EnableSQLiteBridge && V3_RuntimeEnabled(InpV3_EnableSQLiteBridge, InpV3_SQLitePath))
+                     V3_DeleteWorkerStatus(InpV3_SQLitePath, coordinatorKey, assignedSymbol, chartId);
                   if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiWarning(), " Closed worker chart ", chartId,
                         " — reason: ", closeReason, ".");
                }
@@ -3681,6 +3832,11 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
                   string assignmentFile = MBP_WorkerAssignmentFile(chartId);
                   if(FileIsExist(assignmentFile, FILE_COMMON))
                      FileDelete(assignmentFile, FILE_COMMON);
+                  string workerHbFile = MBP_WorkerHeartbeatFile(assignedSymbol, coordinatorKey);
+                  if(FileIsExist(workerHbFile, FILE_COMMON))
+                     FileDelete(workerHbFile, FILE_COMMON);
+                  if(InpV3_EnableSQLiteBridge && V3_RuntimeEnabled(InpV3_EnableSQLiteBridge, InpV3_SQLitePath))
+                     V3_DeleteWorkerStatus(InpV3_SQLitePath, coordinatorKey, assignedSymbol, chartId);
                }
             }
          }
@@ -3774,6 +3930,18 @@ void MasterEnsureRuntimeWorkers()
          CustomSymbolSetInteger(workerChartSymbol, SYMBOL_DIGITS, (int)SymbolInfoInteger(baseSymbol, SYMBOL_DIGITS));
          CustomSymbolSetDouble(workerChartSymbol, SYMBOL_POINT, SymbolInfoDouble(baseSymbol, SYMBOL_POINT));
          CustomSymbolSetDouble(workerChartSymbol, SYMBOL_TRADE_TICK_SIZE, SymbolInfoDouble(baseSymbol, SYMBOL_TRADE_TICK_SIZE));
+
+         // Ensure the synthetic symbol has seed history before ChartOpen
+         // so MT5 can open the chart and apply the template without failing/stalling
+         if(Bars(workerChartSymbol, PERIOD_M1) == 0)
+         {
+            MqlRates seedRates[];
+            int seedCount = CopyRates(baseSymbol, PERIOD_M1, 0, 100, seedRates);
+            if(seedCount > 0)
+            {
+               CustomRatesUpdate(workerChartSymbol, seedRates, seedCount);
+            }
+         }
       }
 
       if(!SymbolSelect(baseSymbol, true))
@@ -4029,13 +4197,18 @@ void MasterEnsureRuntimeWorkers()
                FileDelete(assignmentFile, FILE_COMMON);
             if(newlyAssigned && MBP_IsChartAlive(targetChartId))
                ChartClose(targetChartId);
+            G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
             continue;
          }
       }
 
       G_WorkerSlots[i].chartId = targetChartId;
       if(newlyAssigned || templateRequired)
+      {
          G_WorkerSlots[i].lastLaunchAttemptMs = nowMs;
+         ScheduleMasterHostVisibilityHeal(5000);
+         RestoreMasterHostChartFocus();
+      }
 
       datetime heartbeat = 0;
       long heartbeatChartId = 0;
@@ -4946,6 +5119,12 @@ void FinishAsyncControlJob()
       InitReferenceEquity();
       IsPaused = true;
 
+      if(IsParallelCoordinatorMode())
+      {
+         MBP_SetCoordinatorPaused(G_RuntimeCoordinatorKey, true);
+         MBP_SetCoordinatorResetting(G_RuntimeCoordinatorKey, false);
+      }
+
       if(GlobalVariableCheck(InpHedgeChannel + "_STOP_FLAG"))
          GlobalVariableDel(InpHedgeChannel + "_STOP_FLAG");
       if(GlobalVariableCheck(InpHedgeChannel + "_COOLDOWN_TIMER"))
@@ -4955,7 +5134,7 @@ void FinishAsyncControlJob()
 
       ResetBridgePendingRequest();
       GlobalTradingEnabled = true;
-      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiCheck(), " Reset sequence finished asynchronously. System unlocked.");
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiCheck(), " Reset sequence finished asynchronously. System locked in pause until user resumes.");
    }
    else if(G_TradeControlJobType == MBP_CONTROL_JOB_CLOSE_ALL)
    {
@@ -4999,7 +5178,18 @@ bool StartAsyncControlJob(const int jobType, const int symbolIndex, const string
       if(MBP_LogTierEnabled(MBP_LOG_TIER_DEBUG)) Print(EmojiReset(), " Master reset queued. Processing asynchronously.");
       IsPaused = true;
       GlobalTradingEnabled = false;
+      if(IsParallelCoordinatorMode())
+      {
+         MBP_SetCoordinatorPaused(G_RuntimeCoordinatorKey, true);
+         MBP_SetCoordinatorResetting(G_RuntimeCoordinatorKey, true);
+      }
       WipeAllTerminalGlobalVariables();
+      if(IsParallelCoordinatorMode())
+      {
+         MBP_WriteCoordinatorAliveHeartbeat(G_RuntimeCoordinatorKey, ChartID());
+         MBP_SetCoordinatorPaused(G_RuntimeCoordinatorKey, true);
+         MBP_SetCoordinatorResetting(G_RuntimeCoordinatorKey, true);
+      }
    }
    else if(jobType == MBP_CONTROL_JOB_CLOSE_ALL)
    {
@@ -5020,6 +5210,8 @@ void MasterExecuteUiCommand(const SMasterUiCommand &cmd)
    {
       case MBP_UI_CMD_TOGGLE_PAUSE:
          IsPaused = !IsPaused;
+         if(IsParallelCoordinatorMode())
+            MBP_SetCoordinatorPaused(G_RuntimeCoordinatorKey, IsPaused);
          if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(IsPaused ? (EmojiPause() + " Bot paused.") : (EmojiCheck() + " Bot resumed."));
          break;
 
@@ -5377,12 +5569,14 @@ bool InitializeCoordinatorSymbolState(const string symbol, const int index)
    SymbolData[index].BasketActive = false;
    SymbolData[index].BasketInitialEntry = 0.0;
    SymbolData[index].BasketDirection = POSITION_TYPE_BUY;
-   SymbolData[index].BaseSymbol = baseSymbol;
-   SymbolData[index].AnalysisSymbol = baseSymbol;
-   SymbolData[index].symbol = baseSymbol;
    ENUM_MBP_DATA_MODE effectiveMode = MBP_EffectiveDataMode();
    SymbolData[index].DataMode = effectiveMode;
    SymbolData[index].RenkoFamily = MBP_DataModeToRenkoFamily(effectiveMode);
+   SymbolData[index].BaseSymbol = baseSymbol;
+   SymbolData[index].AnalysisSymbol = MBP_IsSyntheticDataMode(effectiveMode)
+                                     ? ResolveSyntheticChartSymbolName(baseSymbol, effectiveMode)
+                                     : baseSymbol;
+   SymbolData[index].symbol = SymbolData[index].AnalysisSymbol;
 
    for(int ma = 0; ma < 5; ma++)
       for(int tf = 0; tf < 7; tf++)
@@ -5449,6 +5643,10 @@ int Master_OnInit()
    G_ADX_MinLevel = ADX_MinLevel;
    G_CurrencyStrengthDelta = CurrencyStrengthDelta;
    G_GridMultiplier = GridMultiplier;
+
+// 1c. Ensure SQLite runtime schema is initialized before any worker/coordinator IPC
+   if(InpV3_EnableSQLiteBridge)
+      V3_EnsureRuntimeSchema(InpV3_SQLitePath);
 
 // 2. Build symbol list
     BuildSymbolList();
@@ -5613,9 +5811,15 @@ int Master_OnInit()
             AdoptExistingPositionsOnStartup(i);
       }
 
-      ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, false);
-      DestroyDashboard();
-      DestroyIndicatorOverlay();
+      ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
+      if(ShowDashboard)
+      {
+         DestroyDashboard();
+         CreateDashboard();
+      }
+      InitIndicatorOverlay();
+      RefreshIndicatorOverlay(true);
+      RefreshCurrentChartBoxLines(true);
 
       if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("MultiBotPro EA Initialized Successfully");
       if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("Account: ", AccountInfoDouble(ACCOUNT_BALANCE), " ", AccountInfoString(ACCOUNT_CURRENCY));
@@ -5794,12 +5998,13 @@ int Master_OnInit()
    // if(!MasterGUI.CreatePanel("HedgeMaster", true)) return INIT_FAILED;
    // -----------------------------------
    // --- INITIALIZE SQLITE BRIDGE ---
-   if(IsBridgeRuntimeEnabled() && InpV3_EnableSQLiteBridge)
+   if(InpV3_EnableSQLiteBridge)
    {
       if(V3_EnsureRuntimeSchema(InpV3_SQLitePath))
       {
          if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiBrain(), " SQLite bridge initialized: ", InpV3_SQLitePath);
-         V3_InsertEventRow(InpV3_SQLitePath, InpHedgeChannel, "master_init", "{\"status\":\"ready\"}");
+         if(IsBridgeRuntimeEnabled())
+            V3_InsertEventRow(InpV3_SQLitePath, InpHedgeChannel, "master_init", "{\"status\":\"ready\"}");
       }
       else
       {
@@ -6034,6 +6239,7 @@ void Master_OnDeinit(const int reason)
 
 // 2. Remove timer
    EventKillTimer();
+   V3_CloseCachedDatabase();
    ResetBridgePendingRequest();
 
 // 3. Destroy Dashboard (Panel, Labels, & Buttons)
@@ -6163,8 +6369,21 @@ void Master_OnTimer()
       if(MBP_WorkerShouldStopForMissingCoordinator("timer"))
          return;
 
+      if(G_RuntimeCoordinatorKey != "")
+      {
+         bool coordPaused = MBP_IsCoordinatorPaused(G_RuntimeCoordinatorKey) || MBP_IsCoordinatorResetting(G_RuntimeCoordinatorKey);
+         IsPaused = coordPaused;
+      }
+
       MasterPublishWorkerHeartbeat();
       MasterPumpTimerServices();
+
+      if(ShowDashboard && !DashboardCollapsed)
+         UpdateDashboard(0);
+
+      RefreshIndicatorOverlay(false);
+      RefreshCurrentChartBoxLines(false);
+
       return;
    }
 
@@ -6185,6 +6404,12 @@ void Master_OnTick()
 
    if(MBP_WorkerShouldStopForMissingCoordinator("tick"))
       return;
+
+   if(IsParallelWorkerMode() && G_RuntimeCoordinatorKey != "")
+   {
+      bool coordPaused = MBP_IsCoordinatorPaused(G_RuntimeCoordinatorKey) || MBP_IsCoordinatorResetting(G_RuntimeCoordinatorKey);
+      IsPaused = coordPaused;
+   }
 
    if(MBP_WorkerTradingPausedForRenkoBuild())
    {
@@ -6401,8 +6626,12 @@ if(G_Cache_IsHardBlock)
          UpdatePositionTracking(symbolIndex);
 
          // --- B. Entry Signals ---
-         bool allowEntry = G_Cache_IsTradingTime && !G_Cache_IsNewsTime;
-         if(OperationMode == MODE_SEMI_AUTO)
+         bool allowEntry = !IsBotPaused() && G_Cache_IsTradingTime && !G_Cache_IsNewsTime;
+         if(IsBotPaused())
+         {
+            SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_SYSTEM_BLOCKED, "Bot is paused");
+         }
+         else if(OperationMode == MODE_SEMI_AUTO)
          {
             SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_SEMI_AUTO, "Auto-entry disabled");
             allowEntry = false;
@@ -6436,19 +6665,23 @@ if(G_Cache_IsHardBlock)
          // --- C. Trade Management (Trailing, Grids, Stacks) ---
          ManageAllPositionsOnTick(symbolIndex);
          if(SymbolData[symbolIndex].HasPendingTrail) ApplyPendingTrail(symbolIndex);
-         CheckStackTradesOnTick(symbolIndex);
 
-         bool gridAllowed = true;
-         if(UseORReversal && !SymbolData[symbolIndex].GridInTrailing) gridAllowed = false;
-         
-         if(RiskMode == RISK_MODE_GRID && gridAllowed && (SymbolData[symbolIndex].GridLevels > 0 || SymbolData[symbolIndex].GridPhase1Active))
+         if(!IsBotPaused())
          {
-            CheckGridOnTick(symbolIndex);
-            if(!SymbolData[symbolIndex].GridTargetReached && SymbolData[symbolIndex].GridPhase1Active)
-               CheckGridTargetOnTick(symbolIndex);
-         }
+            CheckStackTradesOnTick(symbolIndex);
 
-         if(RiskMode == RISK_MODE_ZONE_RECOVERY) CheckZoneRecovery(symbolIndex);
+            bool gridAllowed = true;
+            if(UseORReversal && !SymbolData[symbolIndex].GridInTrailing) gridAllowed = false;
+            
+            if(RiskMode == RISK_MODE_GRID && gridAllowed && (SymbolData[symbolIndex].GridLevels > 0 || SymbolData[symbolIndex].GridPhase1Active))
+            {
+               CheckGridOnTick(symbolIndex);
+               if(!SymbolData[symbolIndex].GridTargetReached && SymbolData[symbolIndex].GridPhase1Active)
+                  CheckGridTargetOnTick(symbolIndex);
+            }
+
+            if(RiskMode == RISK_MODE_ZONE_RECOVERY) CheckZoneRecovery(symbolIndex);
+         }
          ManageRisk(symbolIndex);
       }
 
@@ -6800,20 +7033,45 @@ void SaveAllBankStates()
 //+------------------------------------------------------------------+
 //| HELPER: Persistence for Prune & Crit Banks                       |
 //+------------------------------------------------------------------+
+struct SBankSaveCache
+{
+   double lastPrune;
+   double lastCrit;
+   bool   initialized;
+};
+static SBankSaveCache g_BankSaveCache[];
+
 void SaveBankState(int idx)
 {
    // --- FIX START: BLOCK SAVING DURING RESET ---
    if(G_ResetPending) return;
    // --- FIX END ---
    
-   if(!SymbolData[idx].active) return;
+   if(idx < 0 || idx >= ArraySize(SymbolData) || !SymbolData[idx].active) return;
+
+   if(idx >= ArraySize(g_BankSaveCache))
+      ArrayResize(g_BankSaveCache, idx + 1, 16);
+
+   double curPrune = SymbolData[idx].AccumulatedPruningLoss;
+   double curCrit  = SymbolData[idx].AccumulatedCriticalLoss;
+
+   if(g_BankSaveCache[idx].initialized &&
+      g_BankSaveCache[idx].lastPrune == curPrune &&
+      g_BankSaveCache[idx].lastCrit == curCrit)
+   {
+      return;
+   }
+
+   g_BankSaveCache[idx].lastPrune = curPrune;
+   g_BankSaveCache[idx].lastCrit  = curCrit;
+   g_BankSaveCache[idx].initialized = true;
+
    string sym = SymbolData[idx].symbol;
-   // Create unique names using Magic Number + Symbol
    string pName = StringFormat("MBP_%d_%s_Prune", MagicNumber, sym);
    string cName = StringFormat("MBP_%d_%s_Crit", MagicNumber, sym);
    
-   GlobalVariableSet(pName, SymbolData[idx].AccumulatedPruningLoss);
-   GlobalVariableSet(cName, SymbolData[idx].AccumulatedCriticalLoss);
+   GlobalVariableSet(pName, curPrune);
+   GlobalVariableSet(cName, curCrit);
 }
 
 void LoadBankState(int idx)
@@ -6833,6 +7091,13 @@ void LoadBankState(int idx)
       SymbolData[idx].AccumulatedPruningLoss = GlobalVariableGet(pName);
    if(GlobalVariableCheck(cName)) 
       SymbolData[idx].AccumulatedCriticalLoss = GlobalVariableGet(cName);
+
+   if(idx >= 0 && idx < ArraySize(g_BankSaveCache))
+   {
+      g_BankSaveCache[idx].lastPrune = SymbolData[idx].AccumulatedPruningLoss;
+      g_BankSaveCache[idx].lastCrit = SymbolData[idx].AccumulatedCriticalLoss;
+      g_BankSaveCache[idx].initialized = true;
+   }
 }
 
 void WipeBankState(int idx)
@@ -6840,6 +7105,13 @@ void WipeBankState(int idx)
    // 1. Clear RAM
    SymbolData[idx].AccumulatedPruningLoss = 0;
    SymbolData[idx].AccumulatedCriticalLoss = 0;
+
+   if(idx >= 0 && idx < ArraySize(g_BankSaveCache))
+   {
+      g_BankSaveCache[idx].lastPrune = 0.0;
+      g_BankSaveCache[idx].lastCrit = 0.0;
+      g_BankSaveCache[idx].initialized = true;
+   }
    
    // 2. Clear Global Variable Memory (The "Deep Clean")
    string sym = SymbolData[idx].symbol;
@@ -6998,6 +7270,8 @@ void ClearLicenseCache(const long account)
 
 bool VerifyLicense()
   {
+   G_LicenseExpiredExplicit = false;
+
    if(IsParallelWorkerMode())
      {
       G_LicenseValid = true;
@@ -7049,8 +7323,10 @@ bool VerifyLicense()
    string post_data = "key=" + InpLicenseKey + "&account=" + IntegerToString(cached_account) + "&hwid=" + cached_hwid;
    StringToCharArray(post_data, post);
    
-   // Timeout set to 5000ms. 
-   int res = WebRequest("POST", url, cookie, NULL, 5000, post, ArraySize(post), result, headers);
+   // Timeout set to 8000ms. 
+   ResetLastError();
+   int res = WebRequest("POST", url, cookie, NULL, 8000, post, ArraySize(post), result, headers);
+   int webErr = GetLastError();
 
    if(res == 200)
      {
@@ -7061,9 +7337,10 @@ bool VerifyLicense()
       string message = ExtractJSONValue(responseStr, "message");
       string expires = ExtractJSONValue(responseStr, "expires");
       
-     if(status == "valid")
+      if(status == "valid")
         {
          G_LicenseValid = true;
+         G_LicenseExpiredExplicit = false;
          TouchLicenseCache(cached_account);
          if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiLock(), " MultiBotPro license verified. Expires: ", expires);
          return true;
@@ -7071,6 +7348,7 @@ bool VerifyLicense()
       else if(status == "expired")
         {
          G_LicenseValid = false;
+         G_LicenseExpiredExplicit = true;
          ClearLicenseCache(cached_account);
          if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Subscription expired: ", message);
          return false;
@@ -7078,6 +7356,7 @@ bool VerifyLicense()
       else
         {
          G_LicenseValid = false;
+         G_LicenseExpiredExplicit = true;
          ClearLicenseCache(cached_account);
          if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " License error: ", message);
          return false;
@@ -7085,11 +7364,24 @@ bool VerifyLicense()
      }
    else
      {
-      if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " License server request failed. HTTP code: ", res, " | Error: ", GetLastError());
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT))
+         Print(EmojiWarning(), " License server request failed. HTTP code: ", res, " | Error: ", webErr);
+
       if(UseLicenseReloadGrace(cached_account))
          return true;
 
+      // Mid-session network tolerance: If already running and verified in this session,
+      // a temporary connection/timeout glitch (e.g. error 5203) must not kill the bot or close positions.
+      if(G_LicenseValid)
+        {
+         G_LicenseExpiredExplicit = false;
+         if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT))
+            Print(EmojiWarning(), " Operating under mid-session network grace period. Retaining active license.");
+         return true;
+        }
+
       G_LicenseValid = false;
+      G_LicenseExpiredExplicit = false;
       return false;
      }
   }
@@ -7356,7 +7648,7 @@ void ProcessBridgeFeedbackFileBatch(const string feedbackFile, const int maxItem
          break;
 
       int idx = ArraySize(pending);
-      ArrayResize(pending, idx + 1);
+      ArrayResize(pending, idx + 1, 32);
       pending[idx] = fb;
    }
    FileClose(hf);
@@ -7378,7 +7670,7 @@ void ProcessBridgeFeedbackFileBatch(const string feedbackFile, const int maxItem
       return;
    }
 
-   int hw = FileOpen(feedbackFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
+   int hw = FileOpenRobust(feedbackFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(hw == INVALID_HANDLE)
       return;
 

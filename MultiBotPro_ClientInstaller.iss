@@ -4,10 +4,10 @@
 
 [Setup]
 AppName=MultiBotPro Standalone
-AppVersion=1.1
+AppVersion=2.0
 DefaultDirName={autopf}\MultiBotPro
 DisableProgramGroupPage=yes
-OutputBaseFilename=MultiBotPro_v1.1_Setup
+OutputBaseFilename=MultiBotPro_v2.0_Setup
 OutputDir=Output
 SetupIconFile=romeo.ico
 Compression=lzma
@@ -113,6 +113,7 @@ procedure DeployPayloadToTerminal(const DestBase: string; const PayloadSrc: stri
 var
   InitDbExe: string;
   InitDbArg: string;
+  RuntimeDb: string;
 begin
   CopyDir(PayloadSrc + '\Experts', DestBase + '\MQL5\Experts');
   CopyDir(PayloadSrc + '\Libraries', DestBase + '\MQL5\Libraries');
