@@ -361,35 +361,63 @@ bool V3_EnsureRuntimeSchema(const string sqlitePath)
       return false;
 
    bool ok = true;
+   bool stepOk = false;
    bool migratedLegacySignals = false;
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "PRAGMA journal_mode = WAL");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "PRAGMA synchronous = NORMAL");
-   ok = ok && V3_MigrateLegacySignalsTable(db, migratedLegacySignals);
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, ticket INTEGER, symbol TEXT, action INTEGER, type INTEGER NOT NULL DEFAULT 0, lots REAL, sl_dist_points REAL, tp_dist_points REAL, risk_money REAL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), processed INTEGER NOT NULL DEFAULT 0)");
-   if(ok && !V3_TableHasColumn(db, "signals", "type"))
-      ok = ok && V3_DatabaseExecuteWithRetry(db, "ALTER TABLE signals ADD COLUMN type INTEGER NOT NULL DEFAULT 0");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_signals_channel_processed ON signals(channel, processed, id)");
-   if(ok && migratedLegacySignals && V3_TableExists(db, "signals_legacy"))
-   {
-      ok = ok && V3_DatabaseExecuteWithRetry(db, "INSERT INTO signals(channel, ticket, symbol, action, type, lots, sl_dist_points, tp_dist_points, risk_money, payload_json, created_at, processed) SELECT 'legacy', ticket, symbol, action, 0, lots, sl_dist_points, tp_dist_points, risk_money, '', datetime('now'), 1 FROM signals_legacy");
-   }
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_proposals_channel_state ON proposals(channel, state, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS replies (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, action INTEGER NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_replies_channel_request ON replies(channel, request_id, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, master_ticket INTEGER, action INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), consumed INTEGER NOT NULL DEFAULT 0)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_feedback_channel_consumed ON feedback(channel, consumed, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS state_master (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_state_master_channel ON state_master(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS state_slave (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_state_slave_channel ON state_slave(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_events_channel ON events(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS debt_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, symbol TEXT NOT NULL, event_type TEXT NOT NULL, delta_amount REAL NOT NULL, pruning_balance REAL NOT NULL, critical_balance REAL NOT NULL, metadata_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_debt_ledger_channel ON debt_ledger(channel, id)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS shadow_params (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, payload_json TEXT NOT NULL, score REAL, updated_at TEXT NOT NULL)");
-   ok = ok && V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_shadow_params_symbol ON shadow_params(symbol, updated_at)");
 
+   // Run each migration independently. A transient PRAGMA/lock failure must
+   // not short-circuit the later ALTER TABLE repair.
+   stepOk = V3_DatabaseExecuteWithRetry(db, "PRAGMA journal_mode = WAL");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "PRAGMA synchronous = NORMAL");
+   if(!stepOk) ok = false;
+   stepOk = V3_MigrateLegacySignalsTable(db, migratedLegacySignals);
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, ticket INTEGER, symbol TEXT, action INTEGER, type INTEGER NOT NULL DEFAULT 0, lots REAL, sl_dist_points REAL, tp_dist_points REAL, risk_money REAL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), processed INTEGER NOT NULL DEFAULT 0)");
+   if(!stepOk) ok = false;
+   if(!V3_TableHasColumn(db, "signals", "type"))
+   {
+      stepOk = V3_DatabaseExecuteWithRetry(db, "ALTER TABLE signals ADD COLUMN type INTEGER NOT NULL DEFAULT 0");
+      if(!stepOk) ok = false;
+   }
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_signals_channel_processed ON signals(channel, processed, id)");
+   if(!stepOk) ok = false;
+   if(migratedLegacySignals && V3_TableExists(db, "signals_legacy"))
+   {
+      stepOk = V3_DatabaseExecuteWithRetry(db, "INSERT INTO signals(channel, ticket, symbol, action, type, lots, sl_dist_points, tp_dist_points, risk_money, payload_json, created_at, processed) SELECT 'legacy', ticket, symbol, action, 0, lots, sl_dist_points, tp_dist_points, risk_money, '', datetime('now'), 1 FROM signals_legacy");
+      if(!stepOk) ok = false;
+   }
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'PENDING', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_proposals_channel_state ON proposals(channel, state, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS replies (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, request_id TEXT NOT NULL, action INTEGER NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_replies_channel_request ON replies(channel, request_id, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, master_ticket INTEGER, action INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), consumed INTEGER NOT NULL DEFAULT 0)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_feedback_channel_consumed ON feedback(channel, consumed, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS state_master (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_state_master_channel ON state_master(channel, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS state_slave (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_state_slave_channel ON state_slave(channel, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_events_channel ON events(channel, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS debt_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, symbol TEXT NOT NULL, event_type TEXT NOT NULL, delta_amount REAL NOT NULL, pruning_balance REAL NOT NULL, critical_balance REAL NOT NULL, metadata_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_debt_ledger_channel ON debt_ledger(channel, id)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE TABLE IF NOT EXISTS shadow_params (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, payload_json TEXT NOT NULL, score REAL, updated_at TEXT NOT NULL)");
+   if(!stepOk) ok = false;
+   stepOk = V3_DatabaseExecuteWithRetry(db, "CREATE INDEX IF NOT EXISTS idx_shadow_params_symbol ON shadow_params(symbol, updated_at)");
+   if(!stepOk) ok = false;
    DatabaseClose(db);
    return ok;
 }

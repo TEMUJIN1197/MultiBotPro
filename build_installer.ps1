@@ -15,14 +15,18 @@ $ShadowMasterWorkRoot = Join-Path $ProjectRoot "build\ShadowMaster_rebuild"
 $RebuiltShadowMasterExe = Join-Path $ShadowMasterDistRoot "ShadowMaster.exe"
 $HelperDistRoot = Join-Path $ProjectRoot "build\dist_helpers"
 $HelperWorkRoot = Join-Path $ProjectRoot "build\helpers_rebuild"
-$InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-# Fall back to user-level install location
-if (-not (Test-Path $InnoCompiler)) {
-    $InnoCompiler = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+$InnoCompilerCandidates = @(
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+    "C:\ProgramData\chocolatey\bin\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Antigravity\resources\app\node_modules\innosetup\bin\ISCC.exe"
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+if (-not $InnoCompilerCandidates) {
+    $cmdOnPath = (Get-Command ISCC.exe -ErrorAction SilentlyContinue)
+    if ($cmdOnPath) { $InnoCompilerCandidates = $cmdOnPath.Source }
 }
-if (-not (Test-Path $InnoCompiler)) {
-    $InnoCompiler = "$env:LOCALAPPDATA\Programs\Antigravity\resources\app\node_modules\innosetup\bin\ISCC.exe"
-}
+$InnoCompiler = $InnoCompilerCandidates
 # $SystemPythonRoot was used by Stage-TrimmedPythonRuntime to fall back to a system
 # Python install when the workspace WinPython payload was empty. Both are now
 # dead code — ShadowMaster.exe is a self-contained PyInstaller binary so no
@@ -31,9 +35,19 @@ function New-CleanDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     if (Test-Path $Path) {
-        Remove-Item -LiteralPath $Path -Recurse -Force
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            # MT5 may still hold the prior staged ShadowMaster.exe. Preserve the
+            # locked tree and build into a fresh stage so live terminals do not
+            # need to be stopped just to produce an installer.
+            $backupPath = "$Path.locked.$([DateTime]::Now.ToString('yyyyMMddHHmmss'))"
+            Move-Item -LiteralPath $Path -Destination $backupPath -Force -ErrorAction Stop
+            Write-Warning "Existing stage is locked; using fresh stage. Preserved: $backupPath"
+        }
     }
-    New-Item -ItemType Directory -Path $Path | Out-Null
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
 }
 
 function Copy-TreeContent {
