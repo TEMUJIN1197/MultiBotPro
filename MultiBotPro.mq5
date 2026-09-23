@@ -3718,25 +3718,6 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
    }
 }
 
-string G_PendingClosedChartIds = ""; // Step 10: CSV of chartIds closed but not yet !MBP_IsChartAlive (quarantine 5s)
-ulong G_PendingClosedUntilMs = 0;
-
-bool MBP_IsChartQuarantined(const long chartId) // Step 10: avoid re-assigning just-closed chart
-{
-   if(chartId <= 0 || G_PendingClosedChartIds == "") return false;
-   if(GetTickCount64() > G_PendingClosedUntilMs) { G_PendingClosedChartIds = ""; return false; }
-   string needle = "_" + IntegerToString((int)chartId) + "_";
-   string hay = "_" + G_PendingClosedChartIds + "_";
-   return (StringFind(hay, needle) >= 0);
-}
-void MBP_QuarantineChart(const long chartId)
-{
-   if(chartId <= 0) return;
-   if(G_PendingClosedChartIds != "") G_PendingClosedChartIds += ",";
-   G_PendingClosedChartIds += IntegerToString((int)chartId);
-   G_PendingClosedUntilMs = GetTickCount64() + 5000;
-}
-
 void MasterEnsureRuntimeWorkers()
 {
    if(!IsParallelCoordinatorMode())
