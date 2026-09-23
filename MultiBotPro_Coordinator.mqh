@@ -154,7 +154,7 @@ public:
       }
    }
 
-   // Process incoming worker messages
+   // Process incoming worker messages — Step 11: in-process only (same-chart). Cross-chart via GlobalVariable/file/SQLite.
    int ProcessWorkerMessages()
    {
       if(!m_workerQueue) return 0;

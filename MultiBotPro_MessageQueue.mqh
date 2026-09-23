@@ -38,6 +38,9 @@ struct SMbpMessage
 };
 
 // Thread-safe message queue for Coordinator↔Worker IPC
+// Step 11: NOTE — this queue is IN-PROCESS ONLY (same chart). It does NOT cross chart boundaries.
+// Cross-chart Coordinator↔Worker IPC uses GlobalVariable MBP_COORD_ALIVE/MBP_WB_<sym> + atomic files (MBP_WorkerHeartbeat_, MBP_WorkerAssignment_) + SQLite.
+// Do not use this queue for worker messages expecting cross-chart delivery.
 class CMbpMessageQueue
 {
 private:

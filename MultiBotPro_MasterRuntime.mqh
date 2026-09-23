@@ -696,9 +696,11 @@ void MasterPumpRuntimeServices()
    if(total <= 0)
       return;
 
+   ulong pumpStartMs = GetTickCount64(); // Step 12: 50ms time budget per OnTimer so heartbeat not starved
    int budget = MasterIsUiPriorityWindowActive() ? 1 : MathMin(4, total);
    for(int step = 0; step < budget; step++)
    {
+      if(GetTickCount64() - pumpStartMs > 50) break; // Step 12 budget
       int index = (G_RuntimePumpCursor + step) % total;
       MasterServiceSyntheticSymbol(index, false);
    }
