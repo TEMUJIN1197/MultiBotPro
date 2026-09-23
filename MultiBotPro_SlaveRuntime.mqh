@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                                     MultiBotPro_SlaveRuntime.mqh |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //+------------------------------------------------------------------+
@@ -342,7 +342,7 @@ void Slave_OnTimer()
     }
 
    static ulong lastPanelRefreshMs = 0;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(lastPanelRefreshMs == 0 || (nowMs - lastPanelRefreshMs) >= MBP_SLAVE_PANEL_REFRESH_MS)
    {
       g_SlavePanel.UpdateStats(state);

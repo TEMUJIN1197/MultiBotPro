@@ -150,7 +150,7 @@ bool V3_SqliteBackoffActive()
    if(g_V3_SqliteBackoffUntilMs == 0)
       return false;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(nowMs >= g_V3_SqliteBackoffUntilMs)
    {
       g_V3_SqliteBackoffUntilMs = 0;
@@ -162,7 +162,7 @@ bool V3_SqliteBackoffActive()
 
 void V3_RegisterSqliteFailure(const string stage)
 {
-   g_V3_SqliteBackoffUntilMs = GetTickCount() + (ulong)V3_SQLITE_BACKOFF_MS;
+   g_V3_SqliteBackoffUntilMs = GetTickCount64() + (ulong)V3_SQLITE_BACKOFF_MS;
 
    datetime now = TimeCurrent();
    if((g_V3_LastSqliteLogTime == 0) || ((now - g_V3_LastSqliteLogTime) >= V3_SQLITE_LOCK_LOG_INTERVAL_SEC))

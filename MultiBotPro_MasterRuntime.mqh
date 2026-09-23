@@ -199,7 +199,7 @@ bool MBP_BringChartToFront(const long chartID)
 
 void ScheduleMasterHostVisibilityHeal(const uint durationMs = 5000)
 {
-   ulong deadline = (ulong)GetTickCount() + (ulong)MathMax(500, (int)durationMs);
+   ulong deadline = GetTickCount64() + (ulong)MathMax(500, (int)durationMs);
    if(deadline > G_MasterHostVisibilityHealUntil)
       G_MasterHostVisibilityHealUntil = deadline;
 }
@@ -333,7 +333,7 @@ void MaintainMasterHostChartVisibility()
       }
    }
 
-   if((ulong)GetTickCount() >= G_MasterHostVisibilityHealUntil)
+   if(GetTickCount64() >= G_MasterHostVisibilityHealUntil)
       G_MasterHostVisibilityHealUntil = 0;
 }
 

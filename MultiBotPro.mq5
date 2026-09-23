@@ -351,6 +351,25 @@ bool IsParallelCoordinatorMode();
 bool IsParallelWorkerMode();
 string RuntimeRoleToText(const ENUM_MBP_RUNTIME_ROLE role);
 bool ShadowMaster_ShouldOwnRuntime();
+string G_PendingClosedChartIds = ""; // Step 10: CSV of chartIds closed but not yet !MBP_IsChartAlive (quarantine 5s)
+ulong G_PendingClosedUntilMs = 0;
+
+bool MBP_IsChartQuarantined(const long chartId) // Step 10: avoid re-assigning just-closed chart
+{
+   if(chartId <= 0 || G_PendingClosedChartIds == "") return false;
+   if(GetTickCount64() > G_PendingClosedUntilMs) { G_PendingClosedChartIds = ""; return false; }
+   string needle = "_" + IntegerToString((int)chartId) + "_";
+   string hay = "_" + G_PendingClosedChartIds + "_";
+   return (StringFind(hay, needle) >= 0);
+}
+void MBP_QuarantineChart(const long chartId)
+{
+   if(chartId <= 0) return;
+   if(G_PendingClosedChartIds != "") G_PendingClosedChartIds += ",";
+   G_PendingClosedChartIds += IntegerToString((int)chartId);
+   G_PendingClosedUntilMs = GetTickCount64() + 5000;
+}
+
 void MasterEnsureRuntimeWorkers();
 void WipeAllTerminalGlobalVariables();
 void CloseAllGridPositions(int symbolIndex, string reason);
@@ -1193,7 +1212,7 @@ void RestoreFastChartSwitchDashboardState()
 
 void ResetDashboardHeartbeat()
 {
-   G_DashboardHeartbeatStartMs = GetTickCount();
+   G_DashboardHeartbeatStartMs = GetTickCount64();
    G_DashboardHeartbeatWasEligible = false;
 }
 
@@ -1262,7 +1281,7 @@ bool IsDashboardHeartbeatVisibleNow()
       return false;
    }
 
-   uint nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(G_DashboardHeartbeatStartMs == 0 || !G_DashboardHeartbeatWasEligible)
       G_DashboardHeartbeatStartMs = nowMs;
 
@@ -1530,9 +1549,11 @@ string MBP_SanitizeRuntimeToken(string value)
    return cleaned;
 }
 
-string MBP_WorkerTemplateName()
+string MBP_WorkerTemplateName(const string workerSymbol = "") // Step 10: per-worker template avoids single-file ChartApplyTemplate contention
 {
-   return "MultiBotPro_Worker_" + MBP_SanitizeRuntimeToken(MBP_GetActiveCoordinatorKey()) + ".tpl";
+   string key = MBP_SanitizeRuntimeToken(MBP_GetActiveCoordinatorKey());
+   if(workerSymbol != "") return "MultiBotPro_Worker_" + key + "_" + MBP_SanitizeRuntimeToken(workerSymbol) + ".tpl";
+   return "MultiBotPro_Worker_" + key + ".tpl";
 }
 
 string MBP_WorkerAssignmentFile(const long chartId)
@@ -2886,7 +2907,7 @@ bool MBP_IsWorkerAssignmentInLaunchGrace(const datetime assignedAt,
       return true;
    }
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    return (launchAttemptMs > 0 &&
            nowMs >= launchAttemptMs &&
            (nowMs - launchAttemptMs) <= MBP_WORKER_TEMPLATE_RETRY_MS);
@@ -2993,7 +3014,7 @@ void MBP_LockWorkerChartSymbol()
       return;
 
    static ulong lastLockAttemptMs = 0;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(lastLockAttemptMs > 0 && (nowMs - lastLockAttemptMs) < 5000)
       return;
    lastLockAttemptMs = nowMs;
@@ -3330,7 +3351,7 @@ bool ShadowMaster_WriteRuntimeConfig(const bool forceWrite = false)
       return false;
 
    string signature = ShadowMaster_BuildRuntimeSignature();
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(!forceWrite && signature == G_LastShadowRuntimeSignature && (nowMs - G_LastShadowRuntimeWriteMs) < 900000)
       return true;
 
@@ -3452,7 +3473,7 @@ bool MasterSaveWorkerTemplate(const bool forceSave = false)
    if(!IsParallelCoordinatorMode())
       return false;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    const ulong templateSettleMs = 1500;
    string signature = MasterBuildWorkerTemplateSignature();
    if(!forceSave &&
@@ -3467,7 +3488,7 @@ bool MasterSaveWorkerTemplate(const bool forceSave = false)
       return true;
    }
 
-   string templateName = MBP_WorkerTemplateName();
+   string templateName = MBP_WorkerTemplateName(); // Step 10: base template (per-worker derived at apply time)
    if(!ChartSaveTemplate(0, templateName))
    {
       if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Failed to save worker template: ", templateName);
@@ -3531,7 +3552,7 @@ bool MasterPublishWorkerHeartbeatState(const string runtimeState, const bool for
    if(!IsParallelWorkerMode())
       return false;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    uint heartbeatIntervalMs = (uint)MathMax(250, InpParallelWorkerHeartbeatMs);
    if(!forcePublish &&
       G_WorkerBootstrapCompleted &&
@@ -3679,11 +3700,13 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
                   string assignmentFile = MBP_WorkerAssignmentFile(chartId);
                   if(FileIsExist(assignmentFile, FILE_COMMON))
                      FileDelete(assignmentFile, FILE_COMMON);
+                  MBP_QuarantineChart(chartId); // Step 10 quarantine
                   if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiWarning(), " Closed worker chart ", chartId,
                         " — reason: ", closeReason, ".");
                }
                else if(_LastError == 4102)
                {
+                  MBP_QuarantineChart(chartId); // Step 10 quarantine
                   string assignmentFile = MBP_WorkerAssignmentFile(chartId);
                   if(FileIsExist(assignmentFile, FILE_COMMON))
                      FileDelete(assignmentFile, FILE_COMMON);
@@ -3695,12 +3718,31 @@ void MBP_CloseInactiveWorkerCharts(const string coordinatorKey)
    }
 }
 
+string G_PendingClosedChartIds = ""; // Step 10: CSV of chartIds closed but not yet !MBP_IsChartAlive (quarantine 5s)
+ulong G_PendingClosedUntilMs = 0;
+
+bool MBP_IsChartQuarantined(const long chartId) // Step 10: avoid re-assigning just-closed chart
+{
+   if(chartId <= 0 || G_PendingClosedChartIds == "") return false;
+   if(GetTickCount64() > G_PendingClosedUntilMs) { G_PendingClosedChartIds = ""; return false; }
+   string needle = "_" + IntegerToString((int)chartId) + "_";
+   string hay = "_" + G_PendingClosedChartIds + "_";
+   return (StringFind(hay, needle) >= 0);
+}
+void MBP_QuarantineChart(const long chartId)
+{
+   if(chartId <= 0) return;
+   if(G_PendingClosedChartIds != "") G_PendingClosedChartIds += ",";
+   G_PendingClosedChartIds += IntegerToString((int)chartId);
+   G_PendingClosedUntilMs = GetTickCount64() + 5000;
+}
+
 void MasterEnsureRuntimeWorkers()
 {
    if(!IsParallelCoordinatorMode())
       return;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    uint ensureIntervalMs = MBP_WORKER_ENSURE_INTERVAL_MS;
    if((nowMs - G_LastWorkerEnsureMs) < ensureIntervalMs)
       return;
@@ -3911,9 +3953,10 @@ void MasterEnsureRuntimeWorkers()
             continue;
          }
 
-         templateName = MBP_WorkerTemplateName();
+         templateName = MBP_WorkerTemplateName(baseSymbol); // Step 10: per-worker template
 
          targetChartId = ChartOpen(workerChartSymbol, targetPeriod);
+         if(MBP_IsChartQuarantined(targetChartId)) { ChartClose(targetChartId); G_WorkerSlots[i].lastLaunchAttemptMs = GetTickCount64(); continue; } // Step 10 quarantine
          newlyAssigned = true;
          templateRequired = true;
       }
@@ -4106,7 +4149,7 @@ void ShadowMaster_Supervise(const bool forceLaunch = false)
    if(!ShadowMaster_IsAiRuntimeEnabled() || !ShadowMaster_ShouldOwnRuntime())
       return;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(!forceLaunch && (nowMs - G_LastShadowSupervisorCheckMs) < 30000)
       return;
 
@@ -4332,7 +4375,7 @@ void SmartHedge_QueueSlaveClose(const ulong masterTicket, const string baseSymbo
 
    HedgeSignal signal;
    ZeroMemory(signal);
-   signal.time_msc = GetTickCount();
+   signal.time_msc = GetTickCount64();
    signal.ticket = masterTicket;
    signal.action = 2;
    StringToCharArray(baseSymbol, signal.symbol);
@@ -4664,7 +4707,7 @@ bool WasDashboardButtonHandledRecently(const string btnName)
    if(btnName == "" || G_LastDashboardButtonHandled != btnName)
       return false;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    return (nowMs >= G_LastDashboardButtonHandledMs) && ((nowMs - G_LastDashboardButtonHandledMs) <= DASH_BUTTON_HANDOFF_MS);
 }
 
@@ -4674,7 +4717,7 @@ void RememberDashboardButtonHandled(const string btnName)
       return;
 
    G_LastDashboardButtonHandled = btnName;
-   G_LastDashboardButtonHandledMs = GetTickCount();
+   G_LastDashboardButtonHandledMs = GetTickCount64();
 
    if(ObjectFind(0, btnName) >= 0)
       ObjectSetInteger(0, btnName, OBJPROP_STATE, false);
@@ -4768,7 +4811,7 @@ bool MasterHasPendingTradeControlJob()
 
 void MasterRaiseUiPriorityWindow(const ulong holdMs = 750)
 {
-   ulong untilMs = GetTickCount() + holdMs;
+   ulong untilMs = GetTickCount64() + holdMs;
    if(untilMs > G_MasterUiPriorityUntilMs)
       G_MasterUiPriorityUntilMs = untilMs;
    G_ForceDashboardRefresh = true;
@@ -5005,7 +5048,7 @@ bool StartAsyncControlJob(const int jobType, const int symbolIndex, const string
    G_TradeControlJobSymbolIndex = symbolIndex;
    G_TradeControlJobReason = reason;
    G_ResetPending = (jobType == MBP_CONTROL_JOB_RESET);
-   G_ResetTimestamp = GetTickCount();
+   G_ResetTimestamp = GetTickCount64();
 
    if(jobType == MBP_CONTROL_JOB_RESET)
    {
@@ -6068,7 +6111,7 @@ void Master_OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 bool MasterIsUiPriorityWindowActive()
 {
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(nowMs < G_MasterUiPriorityUntilMs)
       return true;
    if(MasterHasQueuedUiCommands() || MasterHasPendingTradeControlJob())
@@ -6205,14 +6248,14 @@ void Master_OnTick()
       return;
    }
 
-   ulong tickStartMs = GetTickCount();
+   ulong tickStartMs = GetTickCount64();
    bool uiPanelActive = (ShowManualSection || ShowTradeList || Panel_IsModifying ||
                          IsDragging || G_DashboardDragArmed ||
                          tickStartMs < G_MasterUiPriorityUntilMs);
 
    // --- SAFETY VALVE (DEATH SPIRAL PREVENTION) ---
    static bool wasPaused = false;
-   if(GetTickCount() - G_LastLossTime < 5000) 
+   if(GetTickCount64() - G_LastLossTime < 5000) 
    {
       Comment(EmojiWarning() + " Safety pause: cooling down after loss...");
        wasPaused = true; 
@@ -6291,7 +6334,7 @@ void Master_OnTick()
    }
 
    static ulong lastTickBridgeServiceMs = 0;
-   ulong nowBridgeMs = GetTickCount();
+   ulong nowBridgeMs = GetTickCount64();
    if(!uiPanelActive &&
       (lastTickBridgeServiceMs == 0 ||
        nowBridgeMs <= lastTickBridgeServiceMs ||
@@ -6478,7 +6521,7 @@ if(G_Cache_IsHardBlock)
       if(processedSymbols >= maxSymbolsThisTick)
          break;
 
-      if(processedSymbols >= minSymbolsThisTick && (GetTickCount() - tickStartMs) >= tickBudgetMs)
+      if(processedSymbols >= minSymbolsThisTick && (GetTickCount64() - tickStartMs) >= tickBudgetMs)
          break;
    }
 
@@ -6600,7 +6643,7 @@ void Master_OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeR
                            
                            // --- FIX: TRIGGER SAFETY VALVE ---
                            // We just lost money. Stop EVERYTHING immediately.
-                           G_LastLossTime = GetTickCount(); 
+                           G_LastLossTime = GetTickCount64(); 
                            // ---------------------------------
 
                            // --- ADD THIS ---
@@ -6652,7 +6695,7 @@ void Master_OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeR
          HedgeSignal signal;
          ZeroMemory(signal);
          string baseSym = GetBaseSymbol(sym);
-         signal.time_msc = GetTickCount();
+         signal.time_msc = GetTickCount64();
          signal.ticket = posID; // <--- FIX 2: ALWAYS USE POSITION ID
          StringToCharArray(baseSym, signal.symbol);
 
@@ -7038,7 +7081,7 @@ bool VerifyLicense()
    // --- CACHE BUSTER FIX ---
    // We append "?cb=" and the current tick count to the URL.
    // This forces MT5 to fetch a fresh Google Redirect token every hour!
-   string url = GetAuthURL() + "?cb=" + IntegerToString(GetTickCount());
+   string url = GetAuthURL() + "?cb=" + IntegerToString((int)(GetTickCount64() & 0x7FFFFFFF));
    
    string cookie = NULL, headers;
    char post[], result[];
@@ -7442,7 +7485,7 @@ void MasterPublishBridgeState()
       return;
 
    static ulong lastStatePublishMs = 0;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(lastStatePublishMs > 0 && (nowMs - lastStatePublishMs) < 250)
       return;
    lastStatePublishMs = nowMs;

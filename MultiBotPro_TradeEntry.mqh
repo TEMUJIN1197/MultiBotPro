@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_TRADEENTRY_MQH__
+﻿#ifndef __MULTIBOTPRO_TRADEENTRY_MQH__
 #define __MULTIBOTPRO_TRADEENTRY_MQH__
 //+------------------------------------------------------------------+
 //|                                            MultiBotPro_Entry.mqh |
@@ -17,7 +17,7 @@ bool MBP_ShouldLogEntrySignalDiagnostic(const int symbolIndex, const string dire
    static ulong lastLogMs[100] = {0};
    static string lastDirection[100];
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    bool directionChanged = (StringCompare(lastDirection[symbolIndex], direction, false) != 0);
    if(!directionChanged && lastLogMs[symbolIndex] > 0 && (nowMs - lastLogMs[symbolIndex]) < 60000)
       return false;
@@ -48,8 +48,8 @@ void CheckEntrySignals(int symbolIndex)
    // Array ensures every symbol gets its own independent 2-second timer.
    static ulong lastCheckArr[100] = {0};
    if(symbolIndex < 0 || symbolIndex >= 100) return;
-   if(GetTickCount() - lastCheckArr[symbolIndex] < 2000) return;
-   lastCheckArr[symbolIndex] = GetTickCount();
+   if(GetTickCount64() - lastCheckArr[symbolIndex] < 2000) return;
+   lastCheckArr[symbolIndex] = GetTickCount64();
 
    // --- NEW: MAX TRADES FILTER ---
    if(!CheckMaxOpenTrades(symbolIndex)) return;
@@ -681,7 +681,7 @@ bool CheckSpread(int symbolIndex)
    static long s_lastSpreadCheckMs[200];
    static bool s_lastSpreadPass[200];
 
-   long nowMs = (long)GetTickCount();
+   long nowMs = (long)GetTickCount64();
    if(symbolIndex < 200)
      {
       int intervalMs = (InpV3_SpreadCheckMs > 0) ? InpV3_SpreadCheckMs : 1000;

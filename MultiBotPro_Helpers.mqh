@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_HELPERS_MQH__
+﻿#ifndef __MULTIBOTPRO_HELPERS_MQH__
 #define __MULTIBOTPRO_HELPERS_MQH__
 //+------------------------------------------------------------------+
 //|                                          MultiBotPro_Helpers.mqh |
@@ -391,10 +391,10 @@ bool IsNewsTime()
    static ulong _lastCheckTick = 0;
    
    // Only query the database once every 60 seconds (60000 ms)
-   if(GetTickCount() - _lastCheckTick < 60000) 
+   if(GetTickCount64() - _lastCheckTick < 60000) 
       return _cachedResult;
       
-   _lastCheckTick = GetTickCount();
+   _lastCheckTick = GetTickCount64();
    // --- CPU FIX END ---
 
    // CRITICAL: Use Server Time (Real World)
@@ -649,7 +649,7 @@ void SendBridgeSignal(bool isBuy, double volume)
 // 1. Generate Unique Name
    string dir    = isBuy ? "Buy" : "Sell";
 // Use microsecond precision to prevent name collisions during split trades
-   string name   = InpSignalPrefix + "_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount());
+   string name   = InpSignalPrefix + "_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString((int)(GetTickCount64() & 0x7FFFFFFF));
 
 // 2. Determine Price for Visual Placement
    double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -674,7 +674,7 @@ void SendBridgeClose(bool isBuy)
   {
 // Name format: "Signal_Close_Buy_Time_Tick"
    string dir    = isBuy ? "Buy" : "Sell";
-   string name   = InpSignalPrefix + "_Close_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount());
+   string name   = InpSignalPrefix + "_Close_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString((int)(GetTickCount64() & 0x7FFFFFFF));
 
 // Create Arrow (using different color for visual clarity, e.g., Gray)
    if(ObjectCreate(0, name, isBuy ? OBJ_ARROW_DOWN : OBJ_ARROW_UP, 0, TimeCurrent(), 0)) // Price 0 is fine, it just needs to exist
@@ -691,7 +691,7 @@ void SendBridgeSL(bool isBuy, double newSL)
   {
 // Name format: "Signal_SL_Buy_Time_Tick"
    string dir    = isBuy ? "Buy" : "Sell";
-   string name   = InpSignalPrefix + "_SL_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(GetTickCount());
+   string name   = InpSignalPrefix + "_SL_" + dir + "_" + TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString((int)(GetTickCount64() & 0x7FFFFFFF));
 
    double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -2187,7 +2187,7 @@ void V3_PumpBridgeService()
 
    static ulong lastHbMs = 0;
    int intervalMs = (InpV3_HeartbeatIntervalMs > 0) ? InpV3_HeartbeatIntervalMs : 1000;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if(nowMs - lastHbMs < (ulong)intervalMs) return;
    lastHbMs = nowMs;
 
@@ -2600,7 +2600,7 @@ bool SendBridgeProposal(ulong mockTicket, double lots, int type, string sym, dou
    prop.lots       = lots;
    prop.type       = type;
    prop.action     = 10;         // 10 = Proposal Request
-   prop.time_msc   = GetTickCount();
+   prop.time_msc   = GetTickCount64();
    prop.risk_money = riskMoney;
    StringToCharArray(sym, prop.symbol);
 
@@ -2614,7 +2614,7 @@ bool SendBridgeProposal(ulong mockTicket, double lots, int type, string sym, dou
       
       // Lock the Master
       G_HandshakePending = true;
-      G_HandshakeStartTime = GetTickCount();
+      G_HandshakeStartTime = GetTickCount64();
       G_PendingProposalTicket = mockTicket;
       
       if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("🛡️ Handshake sent for ", sym, ". Waiting for slave approval.");

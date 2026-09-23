@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_HEIKENRENKO_MQH__
+﻿#ifndef __MULTIBOTPRO_HEIKENRENKO_MQH__
 #define __MULTIBOTPRO_HEIKENRENKO_MQH__
 //+------------------------------------------------------------------+
 //|                                     MultiBotPro_HeikenRenko.mqh |
@@ -513,9 +513,9 @@ private:
       // Poll until the DLL worker thread has processed all fed data.
       long histInfo[];
       ArrayResize(histInfo, 4);
-      ulong pollStart = GetTickCount();
+      ulong pollStart = GetTickCount64();
       const ulong pollTimeoutMs = 3000;
-      while((GetTickCount() - pollStart) < pollTimeoutMs)
+      while((GetTickCount64() - pollStart) < pollTimeoutMs)
       {
          if(!MBP_ShouldAllowBlockingTradeWait("heiken_renko_dll_history"))
             break;

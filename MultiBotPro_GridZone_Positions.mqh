@@ -1016,7 +1016,7 @@ void ProcessBridgePendingRequest()
    }
 
    int pollMs = (InpV3_HandshakePollMs > 0) ? InpV3_HandshakePollMs : 100;
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    if((nowMs - G_BridgePending.lastExecAttemptMs) < (ulong)MathMax(50, pollMs))
       return;
 
@@ -1058,9 +1058,9 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
       static ulong lastAttemptTimeByIndex[500];
       if(symbolIndex >= 0 && symbolIndex < 500)
       {
-         if(GetTickCount() - lastAttemptTimeByIndex[symbolIndex] < 2000)
+         if(GetTickCount64() - lastAttemptTimeByIndex[symbolIndex] < 2000)
             return;
-         lastAttemptTimeByIndex[symbolIndex] = GetTickCount();
+         lastAttemptTimeByIndex[symbolIndex] = GetTickCount64();
       }
    }
   // ----------------------------------
@@ -1081,7 +1081,7 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
       if(IsBridgeChannelLockActive(InpHedgeChannel, activeRequestId, activeUntil))
       {
          static ulong lastBridgeLockLog = 0;
-         ulong nowMs = GetTickCount();
+         ulong nowMs = GetTickCount64();
          if((nowMs - lastBridgeLockLog) >= 1000)
          {
             if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) PrintFormat(EmojiShield() + " Bridge entry suppressed: channel lock is active (req=%I64d until=%s)",
@@ -1110,9 +1110,9 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
            {
                // Print only once per second to avoid log spam if looped
                static uint lastLog = 0;
-               if(GetTickCount() - lastLog > 60000) {
+               if(GetTickCount64() - lastLog > 60000) {
                    if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print("⚠️ Trading blocked by the hedge master stop flag. Trade entry aborted.");
-                   lastLog = GetTickCount();
+                   lastLog = GetTickCount64();
                }
                return; // EXIT IMMEDIATELY - DO NOT TRADE
            }

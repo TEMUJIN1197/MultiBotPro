@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_INDICATORS_MQH__
+﻿#ifndef __MULTIBOTPRO_INDICATORS_MQH__
 #define __MULTIBOTPRO_INDICATORS_MQH__
 //+------------------------------------------------------------------+
 //|                                       MultiBotPro_Indicators.mqh |
@@ -228,7 +228,7 @@ void QueueBoxHistoryWarmup(const int symbolIndex, const ulong delayMs = 0)
 
    SymbolData[symbolIndex].BoxHistoryWarmupQueued = true;
    SymbolData[symbolIndex].BoxHistoryWarmupDone = false;
-   SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount() + delayMs;
+   SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount64() + delayMs;
   }
 
 void ProcessDeferredBoxHistoryWarmup()
@@ -238,7 +238,7 @@ void ProcessDeferredBoxHistoryWarmup()
    if(totalSymbols <= 0)
       return;
 
-   ulong nowMs = GetTickCount();
+   ulong nowMs = GetTickCount64();
    for(int offset = 0; offset < totalSymbols; offset++)
      {
       int symbolIndex = (nextSymbolIndex + offset) % totalSymbols;
@@ -1329,7 +1329,7 @@ void RefreshCurrentChartBoxLines(const bool force = false)
    static uint lastRefreshMs = 0;
    string focusSymbol = SymbolData[symbolIndex].symbol;
    bool symbolChanged = (lastChartSymbol != _Symbol || lastFocusSymbol != focusSymbol);
-   uint now = GetTickCount();
+   ulong now = GetTickCount64();
 
    if(!force && !symbolChanged && (now - lastRefreshMs) < 500)
       return;
@@ -1438,7 +1438,7 @@ void BackfillBoxHistory(int symbolIndex)
      {
       SymbolData[symbolIndex].BoxHistoryWarmupQueued = true;
       SymbolData[symbolIndex].BoxHistoryWarmupDone = false;
-      SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount() + 25;
+      SymbolData[symbolIndex].BoxHistoryWarmupNextAttemptMs = GetTickCount64() + 25;
       return;
      }
 

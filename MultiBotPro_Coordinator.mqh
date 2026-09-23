@@ -480,7 +480,7 @@ private:
    {
       static string lastClickedSymObj = "";
       static uint lastClickTimeSym = 0;
-      uint currentTime = GetTickCount();
+      ulong currentTime = GetTickCount64();
 
       if(symbolRowObj == lastClickedSymObj && (currentTime - lastClickTimeSym) < 500)
       {
@@ -581,7 +581,7 @@ private:
       else
          MoveDashboardFrameOnly(DashboardX, DashboardY);
       SyncDashboardHeartbeatLayout();
-      G_MasterUiPriorityUntilMs = GetTickCount() + 500;
+      G_MasterUiPriorityUntilMs = GetTickCount64() + 500; // Step 9 monotonic
    }
 
    void HandleWorkerRiskBreach(const SMbpMessage &msg)

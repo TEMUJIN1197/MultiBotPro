@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_GRIDZONE_ANALYSIS_MQH__
+﻿#ifndef __MULTIBOTPRO_GRIDZONE_ANALYSIS_MQH__
 #define __MULTIBOTPRO_GRIDZONE_ANALYSIS_MQH__
 //+------------------------------------------------------------------+
 //|                              MultiBotPro_GridZone_Analysis.mqh   |
@@ -54,9 +54,9 @@ void CheckNewGridLevel(int symbolIndex)
          {
              // Optional: Print once per minute to avoid log spam
              static uint lastLog = 0;
-             if(GetTickCount() - lastLog > 60000) {
+             if(GetTickCount64() - lastLog > 60000) {
                  if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print("🛡️ Grid sequencing blocked by the hedge master. Skipping the next grid-level check.");
-                 lastLog = GetTickCount();
+                 lastLog = GetTickCount64();
              }
              return; // EXIT: Do not calculate levels, do not trade.
          }

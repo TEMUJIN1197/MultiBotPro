@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_VISUALOVERLAY_MQH__
+﻿#ifndef __MULTIBOTPRO_VISUALOVERLAY_MQH__
 #define __MULTIBOTPRO_VISUALOVERLAY_MQH__
 //+------------------------------------------------------------------+
 //|                                  MultiBotPro_VisualOverlay_v2.mqh |
@@ -1165,7 +1165,7 @@ void RefreshIndicatorOverlayForChart(const long chartID,
 
    if(allowFullRedraw && G_IndicatorOverlay.dirty)
    {
-      uint now = GetTickCount();
+      ulong now = GetTickCount64();
       if(now - G_IndicatorOverlay.lastFullRedrawTick >= 500)
       {
          RedrawIndicatorOverlayHistory();
