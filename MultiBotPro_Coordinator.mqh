@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿﻿//+------------------------------------------------------------------+
 //|                                        MultiBotPro_Coordinator.mqh |
 //|                               Copyright 2025, Expert Advisor Pro |
 //|                        Coordinator/Master Orchestration & IPC Hub |
@@ -20,31 +20,35 @@ private:
    CMbpMessageQueue *m_workerQueue;
    CRiskEngine *m_riskEngine;
 
-   static ulong m_lastBankSaveMs;
-   static ulong m_lastSyntheticPumpMs;
-   static ulong m_lastDeferredHousekeepingMs;
-   static ulong m_lastAccountSyncMs;
-   static ulong m_lastDashboardUiMs;
-   static ulong m_lastCoordinatorManageMs;
-   static ulong m_lastBridgeProcessMs;
-   static ulong m_lastTesterSupportMs;
+   // Step 5: per-instance throttles (was static — ctor zero wiped peer instance, leaked across EAs)
+   ulong m_lastBankSaveMs;
+   ulong m_lastSyntheticPumpMs;
+   ulong m_lastDeferredHousekeepingMs;
+   ulong m_lastAccountSyncMs;
+   ulong m_lastDashboardUiMs;
+   ulong m_lastCoordinatorManageMs;
+   ulong m_lastBridgeProcessMs;
+   ulong m_lastTesterSupportMs;
+   int m_workerMsgDropped;
+   int m_workerMsgTotal;
 
 public:
    CCoordinator(CSystemState *sysState, CMbpMessageQueue *coordQueue, CMbpMessageQueue *workerQueue, CRiskEngine *riskEngine) :
       m_systemState(sysState),
       m_coordinatorQueue(coordQueue),
       m_workerQueue(workerQueue),
-      m_riskEngine(riskEngine)
-   {
-      m_lastBankSaveMs = 0;
-      m_lastSyntheticPumpMs = 0;
-      m_lastDeferredHousekeepingMs = 0;
-      m_lastAccountSyncMs = 0;
-      m_lastDashboardUiMs = 0;
-      m_lastCoordinatorManageMs = 0;
-      m_lastBridgeProcessMs = 0;
-      m_lastTesterSupportMs = 0;
-   }
+      m_riskEngine(riskEngine),
+      m_lastBankSaveMs(0),
+      m_lastSyntheticPumpMs(0),
+      m_lastDeferredHousekeepingMs(0),
+      m_lastAccountSyncMs(0),
+      m_lastDashboardUiMs(0),
+      m_lastCoordinatorManageMs(0),
+      m_lastBridgeProcessMs(0),
+      m_lastTesterSupportMs(0),
+      m_workerMsgDropped(0),
+      m_workerMsgTotal(0)
+   {}
 
    ~CCoordinator() {}
 
@@ -61,10 +65,10 @@ public:
       if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("CCoordinator: Initialized");
    }
 
-   // Main coordinator cycle (called from OnTimer)
+   // Main coordinator cycle (called from OnTimer) — Step 5: monotonic GetTickCount64 + worker drain
    void ProcessCycle()
    {
-      ulong timerNowMs = GetTickCount();
+      ulong timerNowMs = GetTickCount64(); // Step 5: 64-bit monotonic
       bool coordinatorMode = IsParallelCoordinatorMode();
       bool workerMode = IsParallelWorkerMode();
 
@@ -72,6 +76,8 @@ public:
       // maintenance so workers do not pause while the coordinator is doing
       // heavier management work later in this timer pass.
       PublishHeartbeats(coordinatorMode);
+      // Step 5: drain worker queue before heavy work so risk breaches are not delayed
+      { int _drained = ProcessWorkerMessages(); if(_drained > 0) m_workerMsgTotal += _drained; }
 
       if(!m_systemState || !m_riskEngine) return;
 
@@ -119,7 +125,7 @@ public:
    // Handle chart event from OnChartEvent
    void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
    {
-      G_MasterUiPriorityUntilMs = GetTickCount() + 250;
+      G_MasterUiPriorityUntilMs = GetTickCount64() + 250; // Step 5 monotonic
 
       if(id == CHARTEVENT_OBJECT_DRAG)
       {
@@ -165,6 +171,7 @@ public:
                HandleWorkerPositionUpdate(msg);
                break;
             default:
+               m_workerMsgDropped++; if(MBP_LogTierEnabled(MBP_LOG_TIER_DEBUG)) Print("CCoordinator: unknown worker msgType=", (int)msg.msgType, " dropped");
                break;
          }
          processedCount++;
@@ -179,12 +186,10 @@ private:
 
    bool ShouldRun(ulong &lastRunMs, const ulong nowMs, const uint cadenceMs)
    {
-      if(lastRunMs == 0 || nowMs <= lastRunMs || (nowMs - lastRunMs) >= cadenceMs)
-      {
-         lastRunMs = nowMs;
-         return true;
-      }
-
+      // Step 5: unsigned elapsed handles 49-day GetTickCount wrap without burst
+      if(lastRunMs == 0) { lastRunMs = nowMs; return true; }
+      ulong elapsed = nowMs - lastRunMs;
+      if(elapsed >= cadenceMs) { lastRunMs = nowMs; return true; }
       return false;
    }
 
@@ -583,20 +588,17 @@ private:
 
    void HandleWorkerPositionUpdate(const SMbpMessage &msg)
    {
+      // Step 5: reconcile book before ACK so coordinator position tracking stays authoritative
+      int symIdx = GetSymbolIndex(msg.senderSymbol);
+      if(symIdx >= 0) UpdatePositionTracking(symIdx);
       if(m_coordinatorQueue)
          m_coordinatorQueue.AcknowledgeById(msg.ackId);
+      if(m_workerQueue) m_workerQueue.PurgeAcknowledged();
    }
 };
 
 // Static member initialization
-ulong CCoordinator::m_lastBankSaveMs = 0;
-ulong CCoordinator::m_lastSyntheticPumpMs = 0;
-ulong CCoordinator::m_lastDeferredHousekeepingMs = 0;
-ulong CCoordinator::m_lastAccountSyncMs = 0;
-ulong CCoordinator::m_lastDashboardUiMs = 0;
-ulong CCoordinator::m_lastCoordinatorManageMs = 0;
-ulong CCoordinator::m_lastBridgeProcessMs = 0;
-ulong CCoordinator::m_lastTesterSupportMs = 0;
+// Step 5: static throttles removed — now per-instance members initialized in ctor
 
 #endif
 

@@ -908,7 +908,7 @@ struct SBridgePendingRequest
 // Helper functions MBP_GetBridgePending(int) and MBP_ClearBridgePending(int) manage
 // a sparse array sized to MBP_MAX_BASKETS (lazy resize). Legacy G_BridgePending
 // is kept as alias to index 0 for helpers that still call G_BridgePending
-// without symbolIndex — new code must use MBP_GetBridgePending(symbolIndex).
+// without symbolIndex ï¿½ new code must use MBP_GetBridgePending(symbolIndex).
 SBridgePendingRequest G_BridgePending;
 SBridgePendingRequest G_BridgePendings[];
 long G_BridgePendingSeq = 0;
@@ -1039,9 +1039,10 @@ struct RuntimeServiceManager
 #endif
 
 #import "kernel32.dll"
-  int  CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, uint lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, int hTemplateFile);
-  bool WriteFile(int hFile, const uchar &lpBuffer[], uint nNumberOfBytesToWrite, uint &lpNumberOfBytesWritten, uint lpOverlapped);
-  bool CloseHandle(int hObject);
+  // Step 6: 64-bit fix â€” HANDLE is 64-bit on MT5, int truncates
+  long CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, uint lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, int hTemplateFile);
+  bool WriteFile(long hFile, const uchar &lpBuffer[], uint nNumberOfBytesToWrite, uint &lpNumberOfBytesWritten, uint lpOverlapped);
+  bool CloseHandle(long hObject);
   bool MoveFileW(string lpExistingFileName, string lpNewFileName);
   uint GetFileAttributesW(string lpFileName);   // Used as accel.dll-free file-existence check
 #import

@@ -1,4 +1,4 @@
-﻿﻿﻿﻿//+------------------------------------------------------------------+
+﻿﻿﻿﻿﻿//+------------------------------------------------------------------+
 //|                                                  MultiBotPro.mq5 |
 //|                               Copyright 2023, Expert Advisor Pro |
 //|                                             https://www.mql5.com |
@@ -6368,7 +6368,7 @@ if(G_Cache_IsHardBlock)
       // If blocked by Hedge Master or Bridge, stop further processing
       // ========================================================
       // Step 4: per-symbol bridge gate (was single global blocking all symbols)
-      SBridgePendingRequest* _bp = MBP_GetBridgePending(symbolIndex); bool _bridged = (CheckPointer(_bp)!=POINTER_INVALID && (_bp.active || _bp.approved)) || (G_BridgePending.active || G_BridgePending.approved); if(_bridged)
+      SBridgePendingRequest* _bp = MBP_GetBridgePending(symbolIndex); bool _bridged = false; if(CheckPointer(_bp)!=POINTER_INVALID) _bridged = (_bp.active || _bp.approved); _bridged = _bridged || G_BridgePending.active || G_BridgePending.approved; if(_bridged)
       {
          SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_BRIDGE_PENDING, "Bridge approval pending");
          continue;
