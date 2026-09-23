@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿﻿﻿﻿//+------------------------------------------------------------------+
 //|                                                  MultiBotPro.mq5 |
 //|                               Copyright 2023, Expert Advisor Pro |
 //|                                             https://www.mql5.com |
@@ -51,7 +51,7 @@ double EffectiveMasterRisk = 0;
 // --- CACHED STATE GLOBALS (Updated via OnTimer) ---
 // ==================================================================
 bool   G_Cache_SystemBlocked = false;
-bool   G_Cache_IsTradingTime = true;
+bool   G_Cache_IsTradingTime = false; // Step 3: fail-closed until first OnTimer sync
 bool   G_Cache_IsNewsTime    = false;
 bool   G_Cache_IsHardBlock   = false;
 string G_Cache_BlockReason   = "";
@@ -6367,7 +6367,8 @@ if(G_Cache_IsHardBlock)
       // ?? SYSTEM BLOCK CHECK ??
       // If blocked by Hedge Master or Bridge, stop further processing
       // ========================================================
-      if(G_BridgePending.active || G_BridgePending.approved)
+      // Step 4: per-symbol bridge gate (was single global blocking all symbols)
+      SBridgePendingRequest* _bp = MBP_GetBridgePending(symbolIndex); bool _bridged = (CheckPointer(_bp)!=POINTER_INVALID && (_bp.active || _bp.approved)) || (G_BridgePending.active || G_BridgePending.approved); if(_bridged)
       {
          SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_BRIDGE_PENDING, "Bridge approval pending");
          continue;
@@ -6407,7 +6408,8 @@ if(G_Cache_IsHardBlock)
          UpdatePositionTracking(symbolIndex);
 
          // --- B. Entry Signals ---
-         bool allowEntry = G_Cache_IsTradingTime && !G_Cache_IsNewsTime;
+         // Step 3: centralized gate via CSystemState::CanTrade() (fail-closed, deinit/news/handshake/blockade)
+          bool allowEntry = G_SystemState.CanTrade();
          if(OperationMode == MODE_SEMI_AUTO)
          {
             SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_SEMI_AUTO, "Auto-entry disabled");
@@ -6421,7 +6423,15 @@ if(G_Cache_IsHardBlock)
          {
             SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_NEWS_BLOCKED, "News or holiday window");
          }
-         else if(!isPrimaryBasket)
+         else if(G_SystemState.GetIsDeinit())
+          {
+             SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_SYSTEM_BLOCKED, "Deinit in progress");
+          }
+          else if(G_SystemState.HasPendingProposal())
+          {
+             SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_BRIDGE_PENDING, "Bridge approval pending (system)");
+          }
+          else if(!isPrimaryBasket)
          {
             SetEntryGateDiagnostic(symbolIndex, ENTRY_GATE_NOT_PRIMARY_BASKET, "Primary basket routes new signals");
          }
@@ -7521,6 +7531,8 @@ bool SendAsyncBridgeProposal(int symbolIndex, int type, double lots, string sym,
       FileClose(h);
       
       // 6. Lock the Async State Machine
+      // Step 4: per-symbol bridge — write slot first then legacy alias
+      { SBridgePendingRequest* _p4 = MBP_GetBridgePending(symbolIndex); if(CheckPointer(_p4)!=POINTER_INVALID) { _p4.active=true; _p4.approved=false; _p4.orderType=(ENUM_ORDER_TYPE)type; _p4.requestId=(long)mockTicket; _p4.symbolIndex=symbolIndex; _p4.totalLot=lots; _p4.proposalFile=propFile; _p4.replyFile=repFile; _p4.createdAt=TimeCurrent(); _p4.expiresAt=TimeCurrent()+timeoutSecs; _p4.executionAttempts=0; _p4.lastExecAttemptMs=0; } G_BridgePendingSeq++; }
       G_BridgePending.active       = true;
       G_BridgePending.approved     = false;
       G_BridgePending.orderType = (ENUM_ORDER_TYPE)type;

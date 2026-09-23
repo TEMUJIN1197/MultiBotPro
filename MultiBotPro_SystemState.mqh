@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                          MultiBotPro_SystemState.mqh |
 //|                               Copyright 2025, Expert Advisor Pro |
 //|                                    System State Encapsulation Class |
@@ -57,7 +57,7 @@ public:
    // Constructor
    CSystemState() :
       m_cache_SystemBlocked(false),
-      m_cache_IsTradingTime(true),
+      m_cache_IsTradingTime(false), // Step 3: fail-closed default
       m_cache_IsNewsTime(false),
       m_cache_IsHardBlock(false),
       m_cache_IsDailyCloseBlock(false),
@@ -176,7 +176,7 @@ public:
    void SetPanelSelectedTicket(ulong ticket) { m_panelSelectedTicket = ticket; }
 
    double GetPanelManualLot() const { return m_panelManualLot; }
-   void SetPanelManualLot(double lot) { m_panelManualLot = lot; }
+   void SetPanelManualLot(double lot) { if(lot <= 0.0) lot = 0.01; if(lot > 50.0) lot = 50.0; m_panelManualLot = lot; }
 
    // --- LIFECYCLE FLAGS ---
    bool GetIsDeinit() const { return m_isDeinit; }
@@ -195,10 +195,9 @@ public:
              m_cache_IsDailyCloseBlock;
    }
 
-   bool CanTrade() const
-   {
-      return m_cache_IsTradingTime && !IsSystemOnBlockade();
-   }
+   bool HasPendingProposal() const { return m_handshakePending && m_pendingProposalTicket != 0; }
+   void ResetDaily(const int dayOfYear, const double equity) { m_currentDayOfYear = dayOfYear; m_dayStartEquity = equity; m_dailyStopHit = false; }
+   bool CanTrade() const { if(m_isDeinit) return false; if(!m_cache_IsTradingTime) return false; if(m_cache_IsNewsTime) return false; if(IsSystemOnBlockade()) return false; if(HasPendingProposal()) return false; return true; }
 
    // Thread-safety note: This class should be accessed from OnInit/OnTimer/OnTick/OnChartEvent
    // All getters/setters are simple member access with no external side effects

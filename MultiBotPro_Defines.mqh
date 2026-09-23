@@ -904,7 +904,45 @@ struct SBridgePendingRequest
    long             requestId;
 };
 
+// Step 4: Per-symbol pending map (replaces single global that raced on multi-symbol).
+// Helper functions MBP_GetBridgePending(int) and MBP_ClearBridgePending(int) manage
+// a sparse array sized to MBP_MAX_BASKETS (lazy resize). Legacy G_BridgePending
+// is kept as alias to index 0 for helpers that still call G_BridgePending
+// without symbolIndex — new code must use MBP_GetBridgePending(symbolIndex).
 SBridgePendingRequest G_BridgePending;
+SBridgePendingRequest G_BridgePendings[];
+long G_BridgePendingSeq = 0;
+
+SBridgePendingRequest* MBP_GetBridgePending(const int symbolIndex)
+{
+   if(symbolIndex < 0) return NULL;
+   if(ArraySize(G_BridgePendings) <= symbolIndex)
+      ArrayResize(G_BridgePendings, symbolIndex + 1);
+   return GetPointer(G_BridgePendings[symbolIndex]);
+}
+bool MBP_HasAnyBridgePending()
+{
+   for(int i=0; i<ArraySize(G_BridgePendings); i++)
+      if(G_BridgePendings[i].active || G_BridgePendings[i].approved) return true;
+   if(G_BridgePending.active || G_BridgePending.approved) return true;
+   return false;
+}
+void MBP_ClearBridgePending(const int symbolIndex)
+{
+   if(symbolIndex >= 0 && symbolIndex < ArraySize(G_BridgePendings))
+   {
+      G_BridgePendings[symbolIndex].active = false;
+      G_BridgePendings[symbolIndex].approved = false;
+      G_BridgePendings[symbolIndex].requestId = 0;
+   }
+   // Keep alias in sync if this was index 0
+   if(symbolIndex == 0 || symbolIndex < 0)
+   {
+      G_BridgePending.active = false;
+      G_BridgePending.approved = false;
+      G_BridgePending.requestId = 0;
+   }
+}
 
 // --- STANDALONE RUNTIME STRUCTS ---
 struct SystemSnapshot
