@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_RENKO_MQH__
+﻿#ifndef __MULTIBOTPRO_RENKO_MQH__
 #define __MULTIBOTPRO_RENKO_MQH__
 //+------------------------------------------------------------------+
 //|                                           MultiBotPro_Renko.mqh |
@@ -811,10 +811,15 @@ datetime CRenkoEngine::ResolveHistoryStart() const
 
 CRenkoEngine::SAZRenkoProfile CRenkoEngine::ResolveFamilyProfile() const
 {
+   // Step 9a: Family-specific AZ profiles (was constant 0/1/2 for all families)
    SAZRenkoProfile profile;
-   profile.continuationOpenPct = 0.0;
-   profile.reversalOpenPct = 1.0;
-   profile.reversalDistancePct = 2.0;
+   switch(m_renkoFamily)
+   {
+      case MBP_RENKO_MEDIAN: profile.continuationOpenPct = 0.5; profile.reversalOpenPct = 0.5; profile.reversalDistancePct = 1.5; break;
+      case MBP_RENKO_TURBO:   profile.continuationOpenPct = 0.0; profile.reversalOpenPct = 0.0; profile.reversalDistancePct = 1.0; break;
+      case MBP_RENKO_HYBRID:  profile.continuationOpenPct = 0.25; profile.reversalOpenPct = 0.5; profile.reversalDistancePct = 1.75; break;
+      default:              profile.continuationOpenPct = m_openOffsetPct/100.0; profile.reversalOpenPct = m_reversalShadowPct/100.0; profile.reversalDistancePct = m_reversalPct/100.0; break;
+   }
    return profile;
 }
 
@@ -1298,9 +1303,9 @@ datetime CRenkoEngine::ResolveLiveBarTime(const datetime fallbackTickTime) const
 
 int CRenkoEngine::ResolveLivePreviewSpanSeconds() const
 {
-   int seconds = PeriodSeconds(PERIOD_CURRENT);
-   if(seconds <= 0)
-      seconds = 60;
+   // Step 9a: Renko preview must track M1, not chart PERIOD_CURRENT (phantom bar flickered on H1/D1)
+   int seconds = PeriodSeconds(PERIOD_M1);
+   if(seconds <= 0) seconds = 60;
    return MathMax(60, seconds);
 }
 

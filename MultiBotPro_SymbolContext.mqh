@@ -131,21 +131,30 @@ string GetBaseSymbol(string analysisSymbol)
    string candidates[];
    string guess = "";
    
-   // 1. Try splitting by Dot (Example: "XAUUSD.Renko")
+   // Step 9a: Fix EURUSD.m_Renko / broker suffix splits — underscore first (Renko suffix _R/_MR/_TR), dot second
+   // 1. Underscore (BTCUSD_Renko, EURUSD.m_Renko -> EURUSD.m)
+   if(StringSplit(analysisSymbol, '_', candidates) > 1)
+   {
+      guess = candidates[0];
+      if(SymbolSelect(guess, true)) return guess;
+      int dotPos2 = StringFind(analysisSymbol, ".");
+      if(dotPos2 >= 0)
+      {
+         string withSuffix = analysisSymbol;
+         int usPos = StringFind(withSuffix, "_");
+         if(usPos >= 0) withSuffix = StringSubstr(withSuffix, 0, usPos);
+         if(SymbolSelect(withSuffix, true)) return withSuffix;
+      }
+   }
+   
+   // 2. Dot (XAUUSD.Renko) — only if underscore did not match
    if(StringSplit(analysisSymbol, '.', candidates) > 1)
    {
       guess = candidates[0];
       if(SymbolSelect(guess, true)) return guess;
    }
    
-   // 2. Try splitting by Underscore (Example: "BTCUSD_Renko")
-   if(StringSplit(analysisSymbol, '_', candidates) > 1)
-   {
-      guess = candidates[0];
-      if(SymbolSelect(guess, true)) return guess;
-   }
-   
-   // 3. Try splitting by Space
+   // 3. Space
    if(StringSplit(analysisSymbol, ' ', candidates) > 1)
    {
       guess = candidates[0];
