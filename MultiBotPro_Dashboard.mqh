@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_DASHBOARD_MQH__
+﻿#ifndef __MULTIBOTPRO_DASHBOARD_MQH__
 #define __MULTIBOTPRO_DASHBOARD_MQH__
 //+------------------------------------------------------------------+
 //|                                        MultiBotPro_Dashboard.mqh |
@@ -10,6 +10,9 @@
 // 1. INCLUDE DEFINITIONS (Enums & Structs)
 #include "MultiBotPro_Defines.mqh"
 
+// Define new button names locally if not in Defines
+#define MAN_BTN_LOT_MM "MAN_BTN_LOT_MM" // --
+#define MAN_BTN_LOT_PP "MAN_BTN_LOT_PP" // ++
 #define DASH_HEARTBEAT_DOT  "Dash_Heartbeat_Dot"
 #define DASH_HEARTBEAT_TEXT "Dash_Heartbeat_Text"
 #define DASH_SETTINGS_PREFIX "Set2_"
@@ -19,12 +22,12 @@ int S_Dash(int value) { return (int)MathRound(value * Dash_Scale); }
 
 int PanelBackgroundZOrder()
 {
-   return 150;
+   return 0;
 }
 
 int PanelForegroundZOrder()
 {
-   return 200;
+   return 10;
 }
 
 color PanelBackgroundColor(const color fallback)
@@ -34,7 +37,7 @@ color PanelBackgroundColor(const color fallback)
 
 void ApplyPanelChartForegroundMode()
 {
-   ChartSetInteger(0, CHART_FOREGROUND, false);
+   ChartSetInteger(0, CHART_FOREGROUND, !InpOpaquePanel);
 }
 
 void ApplyPanelBackgroundAppearance(const string name, const color fallbackBg, const color fallbackBorder)
@@ -196,7 +199,11 @@ double GetDashboardSymbolFloatingProfit(const int symbolIndex)
    if(symbolIndex < 0 || symbolIndex >= ArraySize(SymbolData))
       return 0.0;
 
-   string execSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   string execSymbol = GetManagedBaseSymbol(symbolIndex);
+   if(execSymbol == "")
+      execSymbol = GetBaseSymbol(SymbolData[symbolIndex].symbol);
+   if(execSymbol == "")
+      execSymbol = SymbolData[symbolIndex].symbol;
    double totalProfit = 0.0;
 
    for(int i = 0; i < PositionsTotal(); i++)
@@ -206,7 +213,13 @@ double GetDashboardSymbolFloatingProfit(const int symbolIndex)
          continue;
       if(!IsAppTrade(PositionGetInteger(POSITION_MAGIC)))
          continue;
-      if(PositionGetString(POSITION_SYMBOL) != execSymbol)
+
+      string posSymbol = PositionGetString(POSITION_SYMBOL);
+      string posBase = GetBaseSymbol(posSymbol);
+      if(posBase == "")
+         posBase = posSymbol;
+      if(StringCompare(posSymbol, execSymbol, false) != 0 &&
+         StringCompare(posBase, execSymbol, false) != 0)
          continue;
 
       ulong posID = PositionGetInteger(POSITION_IDENTIFIER);
@@ -635,7 +648,12 @@ void UpdateWorkerDashboard()
       ObjectSetInteger(0, "WK_PnL", OBJPROP_COLOR, floatingProfit >= 0.0 ? clrLime : clrTomato);
    }
    if(ObjectFind(0, "WK_Equity") >= 0)
-      ObjectSetString(0, "WK_Equity", OBJPROP_TEXT, "Equity: " + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
+   {
+      double accountFloat = AccountInfoDouble(ACCOUNT_EQUITY) - AccountInfoDouble(ACCOUNT_BALANCE);
+      double workerEquity = (MathAbs(accountFloat) > 0.005) ? accountFloat : floatingProfit;
+      ObjectSetString(0, "WK_Equity", OBJPROP_TEXT, "Equity: " + DoubleToString(workerEquity, 2));
+      ObjectSetInteger(0, "WK_Equity", OBJPROP_COLOR, workerEquity >= 0.0 ? clrLime : clrTomato);
+   }
    if(ObjectFind(0, "WK_Trail") >= 0)
       ObjectSetString(0, "WK_Trail", OBJPROP_TEXT, "Trail: " + GetWorkerDashboardTrailLabel(symbolIndex));
    if(ObjectFind(0, "WK_Smart") >= 0)
@@ -823,10 +841,11 @@ void CreateDashboard()
       DestroyManualElements();
    }
    
-   G_ForceDashboardRefresh = true;
-   UpdateDashboard(0);
    ChartRedraw();
 }
+
+//+------------------------------------------------------------------+
+//| DASHBOARD HELPER: Move Panel Elements                            |
 //+------------------------------------------------------------------+
 void MoveDashboardFrameOnly(int x, int y)
 {
@@ -1127,20 +1146,6 @@ void DestroyDashboard()
    DestroyManualElements();
 }
 
-struct SDashRowCache
-{
-   string sym;
-   string pl;
-   color  plClr;
-   string bank;
-   color  bankClr;
-   string crit;
-   color  critClr;
-   string stat;
-   color  statClr;
-};
-static SDashRowCache g_DashRowCache[];
-
 //+------------------------------------------------------------------+
 //| DASHBOARD HELPER: Update Panel                                   |
 //+------------------------------------------------------------------+
@@ -1150,7 +1155,7 @@ void UpdateDashboard(int dummyIndex)
 
    // [OPTIONAL] Throttle Redraws internally if called from multiple sources
    static uint lastDraw = 0;
-   uint redrawThrottleMs = (ShowManualSection || ShowTradeList || Panel_IsModifying || IsWorkerDashboardMode()) ? 50 : 75;
+   uint redrawThrottleMs = (ShowManualSection || ShowTradeList || Panel_IsModifying || IsWorkerDashboardMode()) ? 75 : 250;
    if(!G_ForceDashboardRefresh && GetTickCount() - lastDraw < redrawThrottleMs) return;
    bool forceDashboardRefresh = G_ForceDashboardRefresh;
    G_ForceDashboardRefresh = false;
@@ -1159,7 +1164,7 @@ void UpdateDashboard(int dummyIndex)
    if(IsWorkerDashboardMode())
    {
       UpdateWorkerDashboard();
-      RequestChartRedraw(0);
+      ChartRedraw();
       return;
    }
 
@@ -1191,52 +1196,27 @@ void UpdateDashboard(int dummyIndex)
       color statColor;
       ResolveDashboardStatus(symbolIndex, statusStr, statColor);
 
-      if(row >= ArraySize(g_DashRowCache))
-         ArrayResize(g_DashRowCache, row + 1, 16);
+      // --- UPDATE ROWS ---
+      if(ObjectFind(0, "Row_Sym_" + idx) >= 0) {
+         // Symbol
+         ObjectSetString(0, "Row_Sym_" + idx, OBJPROP_TEXT, TruncateString(displaySym, 6));
+         // P/L
+         ObjectSetString(0, "Row_PL_" + idx, OBJPROP_TEXT, DoubleToString(profit, 2));
+         ObjectSetInteger(0, "Row_PL_" + idx, OBJPROP_COLOR, (profit >= 0 ? clrLime : clrRed));
+         
+         // BANK (Active Pruning Debt)
+         double debt = GetDashboardSymbolDebt(symbolIndex, false);
+         ObjectSetString(0, "Row_Bank_" + idx, OBJPROP_TEXT, DoubleToString(debt, 2));
+         ObjectSetInteger(0, "Row_Bank_" + idx, OBJPROP_COLOR, (debt > 0 ? clrOrange : clrDarkGray));
 
-      string plStr = DoubleToString(profit, 2);
-      color plClr = (profit >= 0 ? clrLime : clrRed);
-      double debt = GetDashboardSymbolDebt(symbolIndex, false);
-      string bankStr = DoubleToString(debt, 2);
-      color bankClr = (debt > 0 ? clrOrange : clrDarkGray);
-      double crit = GetDashboardSymbolDebt(symbolIndex, true);
-      string critStr = DoubleToString(crit, 2);
-      color critClr = (crit > 0 ? clrRed : clrDarkGray);
-      string symStr = TruncateString(displaySym, 6);
+         // CRIT (Critical/Rescue Debt)
+         double crit = GetDashboardSymbolDebt(symbolIndex, true);
+         ObjectSetString(0, "Row_Crit_" + idx, OBJPROP_TEXT, DoubleToString(crit, 2));
+         ObjectSetInteger(0, "Row_Crit_" + idx, OBJPROP_COLOR, (crit > 0 ? clrRed : clrDarkGray));
 
-      // Only touch GUI objects if values changed or refresh forced
-      if(forceDashboardRefresh ||
-         g_DashRowCache[row].sym != symStr ||
-         g_DashRowCache[row].pl != plStr ||
-         g_DashRowCache[row].plClr != plClr ||
-         g_DashRowCache[row].bank != bankStr ||
-         g_DashRowCache[row].bankClr != bankClr ||
-         g_DashRowCache[row].crit != critStr ||
-         g_DashRowCache[row].critClr != critClr ||
-         g_DashRowCache[row].stat != statusStr ||
-         g_DashRowCache[row].statClr != statColor)
-      {
-         g_DashRowCache[row].sym = symStr;
-         g_DashRowCache[row].pl = plStr;
-         g_DashRowCache[row].plClr = plClr;
-         g_DashRowCache[row].bank = bankStr;
-         g_DashRowCache[row].bankClr = bankClr;
-         g_DashRowCache[row].crit = critStr;
-         g_DashRowCache[row].critClr = critClr;
-         g_DashRowCache[row].stat = statusStr;
-         g_DashRowCache[row].statClr = statColor;
-
-         if(ObjectFind(0, "Row_Sym_" + idx) >= 0) {
-            ObjectSetString(0, "Row_Sym_" + idx, OBJPROP_TEXT, symStr);
-            ObjectSetString(0, "Row_PL_" + idx, OBJPROP_TEXT, plStr);
-            ObjectSetInteger(0, "Row_PL_" + idx, OBJPROP_COLOR, plClr);
-            ObjectSetString(0, "Row_Bank_" + idx, OBJPROP_TEXT, bankStr);
-            ObjectSetInteger(0, "Row_Bank_" + idx, OBJPROP_COLOR, bankClr);
-            ObjectSetString(0, "Row_Crit_" + idx, OBJPROP_TEXT, critStr);
-            ObjectSetInteger(0, "Row_Crit_" + idx, OBJPROP_COLOR, critClr);
-            ObjectSetString(0, "Row_Stat_" + idx, OBJPROP_TEXT, statusStr);
-            ObjectSetInteger(0, "Row_Stat_" + idx, OBJPROP_COLOR, statColor);
-         }
+         // Status
+         ObjectSetString(0, "Row_Stat_" + idx, OBJPROP_TEXT, statusStr);
+         ObjectSetInteger(0, "Row_Stat_" + idx, OBJPROP_COLOR, statColor);
       }
    }
 
@@ -1287,7 +1267,7 @@ void UpdateDashboard(int dummyIndex)
       ObjectSetInteger(0, "Btn_Pause", OBJPROP_BGCOLOR, clrOrange);
    }
 
-   RequestChartRedraw(0);
+   ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
@@ -1564,4 +1544,3 @@ int GetDashboardBottomY()
 //+------------------------------------------------------------------+
 
 #endif // __MULTIBOTPRO_DASHBOARD_MQH__
-

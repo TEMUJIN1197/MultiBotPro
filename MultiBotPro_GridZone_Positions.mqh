@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_GRIDZONE_POSITIONS_MQH__
+﻿#ifndef __MULTIBOTPRO_GRIDZONE_POSITIONS_MQH__
 #define __MULTIBOTPRO_GRIDZONE_POSITIONS_MQH__
 //+------------------------------------------------------------------+
 //|                              MultiBotPro_GridZone_Positions.mqh   |
@@ -1052,12 +1052,6 @@ void ProcessBridgePendingRequest()
 //+------------------------------------------------------------------+
 void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 0.0, bool bypassBridge = false, bool isManualTrade = false)
   {
-   if(!isManualTrade && IsBotPaused())
-   {
-      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("⚠️ Automated trade entry blocked: Bot is paused.");
-      return;
-   }
-
    // --- FIX: RAPID FIRE PREVENTION ---
    if(!bypassBridge)
    {
@@ -1487,11 +1481,15 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
       if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("🛡️ Handshake sent. Lots: ", DoubleToString(totalLotSize, 2), " | waiting for slave approval.");
 
       bool confirmed = false;
-      int timeoutMs = (InpV3_HandshakeTimeoutMs > 0) ? InpV3_HandshakeTimeoutMs : 3000;
-      ulong deadlineMs = GetTickCount64() + (ulong)timeoutMs;
+      int timeout = 30; // 30 * 100ms = 3 seconds
 
-      while(GetTickCount64() < deadlineMs)
+      while(timeout > 0)
       {
+         if(MBP_ShouldAllowBlockingTradeWait("bridge_handshake"))
+            Sleep(100);
+         else
+            break;
+
          if(FileIsExist(replyFile, FILE_COMMON))
          {
             int hr = FileOpen(replyFile, FILE_READ|FILE_BIN|FILE_COMMON);
@@ -1517,19 +1515,17 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
                break;
             }
          }
-
-         if(MBP_ShouldAllowBlockingTradeWait("bridge_handshake"))
-            Sleep(5);
-         else
-            break;
+         timeout--;
       }
 
-      if(!confirmed)
+      if(timeout <= 0)
       {
-         if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("⚠️ Handshake timed out or rejected. Slave did not confirm.");
+         if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("⚠️ Handshake timed out. Slave did not respond.");
          FileDelete(proposalFile, FILE_COMMON);
          return;
       }
+
+      if(!confirmed) return;
    }
 
    if((RiskMode == RISK_MODE_GRID || RiskMode == RISK_MODE_ZONE_RECOVERY) &&
@@ -1550,7 +1546,7 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
      {
       // Tiny delay between splits to prevent sequence errors/broker rejection
       if(i > 0 && MBP_ShouldAllowBlockingTradeWait("split_trade"))
-         Sleep(25);
+         Sleep(100);
 
       string tradeComment = comment;
       if(numTrades > 1)
@@ -1570,9 +1566,9 @@ void OpenTrade(int symbolIndex, ENUM_ORDER_TYPE orderType, double overrideLot = 
           // Check for Timeout (10005) or Connection Error (10031)
           if(retCode == TRADE_RETCODE_TIMEOUT || retCode == TRADE_RETCODE_CONNECTION)
           {
-              if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("⚠️ Order timeout detected. Verifying fill status.");
+              if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print("⚠️ Order timeout detected. Pausing 2 seconds to check for ghost fills.");
               if(MBP_ShouldAllowBlockingTradeWait("ghost_fill"))
-                 Sleep(250); // Bounded short check instead of full 2-second stall
+                 Sleep(2000); // Wait for broker to maybe fill it
 
               // Force a scan of open positions to see if it actually opened
               UpdatePositionTracking(symbolIndex);
@@ -1927,16 +1923,12 @@ void UpdatePositionTracking(int symbolIndex)
       SymbolData[symbolIndex].NonGridStack.SLMovedThisTick = false;
       SymbolData[symbolIndex].NonGridStack.LastSLMoveTime = 0;
       SymbolData[symbolIndex].NonGridStack.LastSLPrice = 0;
-      SymbolData[symbolIndex].NonGridStack.ProfitMoveCounter = 0;
-      SymbolData[symbolIndex].NonGridStack.LastOpenedProfitMove = 0;
 
       SymbolData[symbolIndex].GridStack.Counter = 0;
       SymbolData[symbolIndex].GridStack.LastProcessedCounter = 0;
       SymbolData[symbolIndex].GridStack.SLMovedThisTick = false;
       SymbolData[symbolIndex].GridStack.LastSLMoveTime = 0;
       SymbolData[symbolIndex].GridStack.LastSLPrice = 0;
-      SymbolData[symbolIndex].GridStack.ProfitMoveCounter = 0;
-      SymbolData[symbolIndex].GridStack.LastOpenedProfitMove = 0;
 
       SymbolData[symbolIndex].NonGridSLMovedThisTick = false;
       SymbolData[symbolIndex].GridSLMovedThisTick = false;

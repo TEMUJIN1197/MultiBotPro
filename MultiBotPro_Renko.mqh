@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_RENKO_MQH__
+﻿#ifndef __MULTIBOTPRO_RENKO_MQH__
 #define __MULTIBOTPRO_RENKO_MQH__
 //+------------------------------------------------------------------+
 //|                                           MultiBotPro_Renko.mqh |
@@ -33,9 +33,6 @@ private:
    string   m_gvPrefix;
 
    double   m_anchorPrice;
-   double   m_lastBarOpen;
-   double   m_prevCommittedHigh;
-   double   m_prevCommittedLow;
    double   m_boxHigh;
    double   m_boxLow;
    bool     m_isTrendUp;
@@ -182,7 +179,7 @@ private:
    void BuildLiveBrick(double &brickOpen, double &brickClose, double &brickHigh, double &brickLow);
    void UpdateLiveBlock(double price, datetime tickTime, long tickTimeMsc, double sourceBid, double sourceAsk, bool forcePublish = false);
    void PublishDirectLiveRate();
-   void DeletePublishedLivePreviewRate(const datetime barTime = 0, const bool redraw = true);
+   void DeletePublishedLivePreviewRate(const datetime barTime = 0);
    void PurgeLivePreviewArtifactsForCommit(const datetime committedTime);
    void UpdateCustomQuoteFields(const double bid, const double ask);
    void PublishLiveQuoteTick(const double bid, const double ask, long requestedTimeMsc);
@@ -499,8 +496,16 @@ void CRenkoEngine::ProcessTimer(const MqlTick &tick, const bool hasLiveTick)
       double livePrice = (tick.bid > 0.0) ? tick.bid : tick.last;
       if(livePrice > 0.0)
       {
-         RefreshLiveCandidateState(livePrice, tick.time, true);
-         UpdateLiveBlock(livePrice, tick.time, tick.time_msc, m_lastSourceBid, m_lastSourceAsk, false);
+         double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+         if(point <= 0.0)
+            point = _Point;
+         bool priceChanged = (m_lastLivePrice <= 0.0 ||
+                              MathAbs(NormalizePrice(livePrice) - m_lastLivePrice) > point / 2.0);
+         if(priceChanged || !m_liveCandidateActive)
+         {
+            RefreshLiveCandidateState(livePrice, tick.time, true);
+            UpdateLiveBlock(livePrice, tick.time, tick.time_msc, m_lastSourceBid, m_lastSourceAsk, false);
+         }
       }
    }
 
@@ -615,23 +620,8 @@ bool CRenkoEngine::BuildHistory()
 
 bool CRenkoEngine::GetBar(int shift, SMBPCustomBar &outBar)
 {
-   if(shift == 0 && m_liveCandidateActive)
-   {
-      BuildLiveBrick(outBar.open, outBar.close, outBar.high, outBar.low);
-      datetime liveTickTime = (m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent();
-      outBar.time = ResolveLiveBarTime(liveTickTime);
-      if(outBar.time <= 0)
-         outBar.time = TimeCurrent();
-      outBar.tick_volume = MathMax(1, m_tickVolBuffer);
-      return true;
-   }
-
-   int committedShift = shift;
-   if(m_liveCandidateActive && shift > 0)
-      committedShift = shift - 1;
-
    MqlRates rates[];
-   if(CopyRates(m_customSymbol, PERIOD_M1, committedShift, 1, rates) <= 0)
+   if(CopyRates(m_customSymbol, PERIOD_M1, shift, 1, rates) <= 0)
       return false;
 
    outBar.open = rates[0].open;
@@ -647,9 +637,6 @@ void CRenkoEngine::ResetRuntimeState()
 {
    ArrayFree(m_ramRateBuffer);
    m_anchorPrice = 0.0;
-   m_lastBarOpen = 0.0;
-   m_prevCommittedHigh = 0.0;
-   m_prevCommittedLow = 0.0;
    m_boxHigh = 0.0;
    m_boxLow = 0.0;
    m_isTrendUp = true;
@@ -882,18 +869,6 @@ bool CRenkoEngine::HasCleanRecentHistory()
    int checked = 0;
    for(int i = 0; i < copied - 1; i++)
    {
-      double h1 = MathMax(rates[i].open, rates[i].close);
-      double l1 = MathMin(rates[i].open, rates[i].close);
-      double h2 = MathMax(rates[i + 1].open, rates[i + 1].close);
-      double l2 = MathMin(rates[i + 1].open, rates[i + 1].close);
-      if(MathAbs(h1 - h2) < point * 0.5 && MathAbs(l1 - l2) < point * 0.5)
-      {
-         if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT))
-            Print("[Renko] Existing custom history for ", m_customSymbol,
-                  " contains duplicate side-by-side bars at [", l1, ", ", h1, "]. Rebuilding once to restore step-ladder bars.");
-         return false;
-      }
-
       double brickOpen = NormalizePrice(rates[i].open);
       double brickClose = NormalizePrice(rates[i].close);
       double body = MathAbs(brickClose - brickOpen);
@@ -1144,6 +1119,10 @@ void CRenkoEngine::ReanchorHistoryBufferToServerTime()
    if(newestAllowed <= 0)
       newestAllowed = now;
 
+   datetime newestBuffered = m_ramRateBuffer[total - 1].time;
+   if(newestBuffered <= newestAllowed)
+      return;
+
    datetime firstTime = newestAllowed - (datetime)((total - 1) * displaySpan);
    if(firstTime <= 0)
       firstTime = newestAllowed - (datetime)(total - 1);
@@ -1220,9 +1199,6 @@ void CRenkoEngine::SeedFromFirstPrice(const double price, const datetime tickTim
       m_lockedBlockSize = m_currentBlockSizePoint;
    m_anchorPrice = NormalizeFirstBrickAnchor(price);
    m_lastClosePrice = m_anchorPrice;
-   m_lastBarOpen = m_anchorPrice;
-   m_prevCommittedHigh = 0.0;
-   m_prevCommittedLow = 0.0;
    m_boxHigh = m_anchorPrice;
    m_boxLow = m_anchorPrice;
    m_liveLogicalStartTime = ResolveCandidateStartTime(tickTime);
@@ -1246,24 +1222,34 @@ void CRenkoEngine::SeedFromFirstPrice(const double price, const datetime tickTim
 
 double CRenkoEngine::CalculateContinuationOpen(const bool bullishBrick, const double anchorPrice, const double blockSize) const
 {
-   return NormalizePrice(anchorPrice);
+   SAZRenkoProfile profile = ResolveFamilyProfile();
+   if(profile.continuationOpenPct <= 0.0)
+      return NormalizePrice(anchorPrice);
+
+   double offset = NormalizePriceDistance(blockSize * profile.continuationOpenPct);
+   return NormalizePrice(anchorPrice + (bullishBrick ? -offset : offset));
 }
 
 double CRenkoEngine::CalculateReversalDistance(const double blockSize) const
 {
-   return NormalizePriceDistance(2.0 * blockSize);
+   SAZRenkoProfile profile = ResolveFamilyProfile();
+   return NormalizePriceDistance(blockSize * profile.reversalDistancePct);
 }
 
 double CRenkoEngine::CalculateReversalOpen(const bool bullishReversal, const double anchorPrice, const double blockSize) const
 {
-   double revOpen = (m_lastBarOpen > 0.0) ? m_lastBarOpen : (bullishReversal ? anchorPrice + blockSize : anchorPrice - blockSize);
-   return NormalizePrice(revOpen);
+   SAZRenkoProfile profile = ResolveFamilyProfile();
+   double offset = NormalizePriceDistance(blockSize * profile.reversalOpenPct);
+   if(offset <= 0.0)
+      offset = NormalizePriceDistance(blockSize);
+
+   return NormalizePrice(anchorPrice + (bullishReversal ? offset : -offset));
 }
 
 double CRenkoEngine::CalculateReversalClose(const bool bullishReversal, const double anchorPrice, const double blockSize) const
 {
-   double revOpen = CalculateReversalOpen(bullishReversal, anchorPrice, blockSize);
-   return NormalizePrice(revOpen + (bullishReversal ? blockSize : -blockSize));
+   double distance = CalculateReversalDistance(blockSize);
+   return NormalizePrice(anchorPrice + (bullishReversal ? distance : -distance));
 }
 
 datetime CRenkoEngine::ResolveCandidateStartTime(const datetime tickTime) const
@@ -1283,11 +1269,30 @@ datetime CRenkoEngine::ResolvePublishedCandidateTime(const datetime logicalStart
 
 datetime CRenkoEngine::ResolveLiveBarTime(const datetime fallbackTickTime) const
 {
-   int displaySpan = ResolveLivePreviewSpanSeconds();
-   if(m_lastCommittedTime > 0)
-      return m_lastCommittedTime + displaySpan;
-   datetime liveTime = (fallbackTickTime > 0) ? fallbackTickTime : TimeCurrent();
-   return ResolvePublishedCandidateTime(liveTime);
+   datetime resolved = 0;
+   if(m_liveLogicalStartTime > 0)
+      resolved = ResolvePublishedCandidateTime(m_liveLogicalStartTime);
+   else if(m_lastCommittedTime > 0)
+      resolved = m_lastCommittedTime + ResolveLivePreviewSpanSeconds();
+   else
+   {
+      datetime liveTime = (fallbackTickTime > 0) ? fallbackTickTime : TimeCurrent();
+      resolved = ResolvePublishedCandidateTime(liveTime);
+   }
+
+   datetime now = RuntimeServerNow();
+   if(now > 0)
+   {
+      int displaySpan = ResolveLivePreviewSpanSeconds();
+      datetime committedAllowed = now - (now % displaySpan);
+      if(committedAllowed >= now)
+         committedAllowed -= displaySpan;
+      datetime liveAllowed = committedAllowed + displaySpan;
+      if(liveAllowed > 0 && resolved > liveAllowed)
+         resolved = liveAllowed;
+   }
+
+   return resolved;
 }
 
 int CRenkoEngine::ResolveLivePreviewSpanSeconds() const
@@ -1301,17 +1306,22 @@ int CRenkoEngine::ResolveLivePreviewSpanSeconds() const
 datetime CRenkoEngine::ResolveHybridDisplayTime(const datetime eventTime) const
 {
    int displaySpan = ResolveLivePreviewSpanSeconds();
-   if(m_lastCommittedTime <= 0)
-   {
-      datetime serverTime = (eventTime > 0) ? eventTime : TimeCurrent();
-      if(serverTime <= 0)
-         serverTime = TimeCurrent();
-      datetime serverSlot = serverTime - (serverTime % displaySpan);
-      return (serverSlot > 0) ? serverSlot : serverTime;
-   }
+   datetime serverTime = (eventTime > 0) ? eventTime : TimeCurrent();
+   if(serverTime <= 0)
+      serverTime = TimeCurrent();
 
-   // Always consecutive with zero break between history bars
-   return m_lastCommittedTime + displaySpan;
+   datetime serverSlot = serverTime - (serverTime % displaySpan);
+   if(serverSlot <= 0)
+      serverSlot = serverTime;
+
+   if(m_lastCommittedTime <= 0)
+      return serverSlot;
+
+   datetime sequentialSlot = m_lastCommittedTime + displaySpan;
+   if(serverSlot > m_lastCommittedTime)
+      return (serverSlot > sequentialSlot) ? serverSlot : sequentialSlot;
+
+   return sequentialSlot;
 }
 
 datetime CRenkoEngine::ResolveCompletedBrickTime(const datetime tickTime) const
@@ -1395,43 +1405,19 @@ void CRenkoEngine::RefreshLiveCandidateState(const double price, const datetime 
       return;
    }
 
-   double priorOpen = (m_lastBarOpen > 0.0) ? m_lastBarOpen : (m_isTrendUp ? m_anchorPrice - blockSize : m_anchorPrice + blockSize);
-
-   bool bullishCandidate = m_isTrendUp;
-   double candidateOpen = m_anchorPrice;
-   double candidateTarget = m_anchorPrice;
-
-   if(m_isTrendUp)
-   {
-      if(normalizedPrice <= priorOpen + point / 2.0)
-      {
-         bullishCandidate = false;
-         candidateOpen = priorOpen;
-         candidateTarget = NormalizePrice(priorOpen - blockSize);
-      }
-      else
-      {
-         bullishCandidate = true;
-         candidateOpen = m_anchorPrice;
-         candidateTarget = NormalizePrice(m_anchorPrice + blockSize);
-      }
-   }
-   else
-   {
-      if(normalizedPrice >= priorOpen - point / 2.0)
-      {
-         bullishCandidate = true;
-         candidateOpen = priorOpen;
-         candidateTarget = NormalizePrice(priorOpen + blockSize);
-      }
-      else
-      {
-         bullishCandidate = false;
-         candidateOpen = m_anchorPrice;
-         candidateTarget = NormalizePrice(m_anchorPrice - blockSize);
-      }
-   }
+   bool bullishCandidate = (normalizedPrice > (m_anchorPrice + point / 2.0))
+                           ? true
+                           : ((normalizedPrice < (m_anchorPrice - point / 2.0)) ? false : m_isTrendUp);
    bool useReversalCandidate = (bullishCandidate != m_isTrendUp);
+
+   double candidateOpen = useReversalCandidate
+                          ? CalculateReversalOpen(bullishCandidate, m_anchorPrice, blockSize)
+                          : CalculateContinuationOpen(bullishCandidate, m_anchorPrice, blockSize);
+   double candidateTarget = useReversalCandidate
+                            ? CalculateReversalClose(bullishCandidate, m_anchorPrice, blockSize)
+                            : NormalizePrice(m_anchorPrice + (bullishCandidate ? blockSize : -blockSize));
+   candidateOpen = NormalizePrice(candidateOpen);
+   candidateTarget = NormalizePrice(candidateTarget);
 
    double closeMin = MathMin(candidateOpen, candidateTarget);
    double closeMax = MathMax(candidateOpen, candidateTarget);
@@ -1536,90 +1522,71 @@ bool CRenkoEngine::ProcessRenkoTick(double price, datetime tickTime, long tickVo
    while(loops++ < 1000)
    {
       bool action = false;
-      double priorOpen = (m_lastBarOpen > 0.0) ? m_lastBarOpen : (m_isTrendUp ? m_anchorPrice - blockSize : m_anchorPrice + blockSize);
+      double upTarget = NormalizePrice(m_anchorPrice + blockSize);
+      double downTarget = NormalizePrice(m_anchorPrice - blockSize);
+      double reversalUpTarget = NormalizePrice(m_anchorPrice + reversalDistance);
+      double reversalDownTarget = NormalizePrice(m_anchorPrice - reversalDistance);
 
       if(m_isTrendUp)
       {
-         double upTarget = NormalizePrice(m_anchorPrice + blockSize);
-         double reversalDownTarget = NormalizePrice(priorOpen - blockSize);
-
-         if(normalizedPrice >= upTarget - point / 2.0)
-         {
-            double open = m_anchorPrice;
-            double close = upTarget;
+        if(normalizedPrice >= upTarget - point / 2.0)
+        {
+            double open = CalculateContinuationOpen(true, m_anchorPrice, blockSize);
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate(0, false);
+               DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
-            PushCompletedBrick(completedStart, open, close, close, open, m_tickVolBuffer, tickTimeMsc);
-            m_anchorPrice = close;
-            m_lastBarOpen = open;
-            m_isTrendUp = true;
+            PushCompletedBrick(completedStart, open, upTarget, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
+            m_anchorPrice = upTarget;
             action = true;
-            created = true;
-            m_tickVolBuffer = 0;
          }
-         else if(normalizedPrice <= reversalDownTarget + point / 2.0)
-         {
-            double open = priorOpen;
-            double close = reversalDownTarget;
+        else if(normalizedPrice <= reversalDownTarget + point / 2.0)
+        {
+            double open = CalculateReversalOpen(false, m_anchorPrice, blockSize);
+            double close = CalculateReversalClose(false, m_anchorPrice, blockSize);
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate(0, false);
+               DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
-            PushCompletedBrick(completedStart, open, close, open, close, m_tickVolBuffer, tickTimeMsc);
+            PushCompletedBrick(completedStart, open, close, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
             m_anchorPrice = close;
-            m_lastBarOpen = open;
             m_isTrendUp = false;
             action = true;
-            created = true;
-            m_tickVolBuffer = 0;
          }
       }
       else
       {
-         double downTarget = NormalizePrice(m_anchorPrice - blockSize);
-         double reversalUpTarget = NormalizePrice(priorOpen + blockSize);
-
-         if(normalizedPrice <= downTarget + point / 2.0)
-         {
-            double open = m_anchorPrice;
-            double close = downTarget;
+        if(normalizedPrice <= downTarget + point / 2.0)
+        {
+            double open = CalculateContinuationOpen(false, m_anchorPrice, blockSize);
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate(0, false);
+               DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
-            PushCompletedBrick(completedStart, open, close, open, close, m_tickVolBuffer, tickTimeMsc);
-            m_anchorPrice = close;
-            m_lastBarOpen = open;
-            m_isTrendUp = false;
+            PushCompletedBrick(completedStart, open, downTarget, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
+            m_anchorPrice = downTarget;
             action = true;
-            created = true;
-            m_tickVolBuffer = 0;
          }
-         else if(normalizedPrice >= reversalUpTarget - point / 2.0)
-         {
-            double open = priorOpen;
-            double close = reversalUpTarget;
+        else if(normalizedPrice >= reversalUpTarget - point / 2.0)
+        {
+            double open = CalculateReversalOpen(true, m_anchorPrice, blockSize);
+            double close = CalculateReversalClose(true, m_anchorPrice, blockSize);
             datetime completedStart = ResolveCompletedBrickTime(tickTime);
             if(!m_isReplayingHistory)
             {
-               DeletePublishedLivePreviewRate(0, false);
+               DeletePublishedLivePreviewRate();
                DeleteLivePreviewOverlay();
             }
-            PushCompletedBrick(completedStart, open, close, close, open, m_tickVolBuffer, tickTimeMsc);
+            PushCompletedBrick(completedStart, open, close, m_boxHigh, m_boxLow, m_tickVolBuffer, tickTimeMsc);
             m_anchorPrice = close;
-            m_lastBarOpen = open;
             m_isTrendUp = true;
             action = true;
-            created = true;
-            m_tickVolBuffer = 0;
          }
       }
 
@@ -1698,20 +1665,6 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
       return;
    }
 
-   // Safety cleanup: ensure the new completed bar is NEVER on the exact same price level as the previous bar
-   double prevHigh = (idx > 0) ? MathMax(m_ramRateBuffer[idx - 1].open, m_ramRateBuffer[idx - 1].close) : m_prevCommittedHigh;
-   double prevLow  = (idx > 0) ? MathMin(m_ramRateBuffer[idx - 1].open, m_ramRateBuffer[idx - 1].close) : m_prevCommittedLow;
-   if(prevHigh > 0.0 && prevLow > 0.0)
-   {
-      if(MathAbs(bodyHigh - prevHigh) < point * 0.5 && MathAbs(bodyLow - prevLow) < point * 0.5)
-      {
-         if(MBP_LogTierEnabled(MBP_LOG_TIER_DEBUG)) Print("[Renko] Rejected side-by-side artifact brick at level [", bodyLow, ", ", bodyHigh, "]");
-         ArrayResize(m_ramRateBuffer, idx);
-         m_phase = priorPhase;
-         return;
-      }
-   }
-
    m_ramRateBuffer[idx].time = displayTime;
    m_ramRateBuffer[idx].open = brickOpen;
    m_ramRateBuffer[idx].high = NormalizePrice(bodyHigh);
@@ -1721,9 +1674,6 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
    m_ramRateBuffer[idx].spread = 0;
    m_ramRateBuffer[idx].real_volume = 0;
 
-   m_prevCommittedHigh = bodyHigh;
-   m_prevCommittedLow = bodyLow;
-   m_lastBarOpen = brickOpen;
    m_lastClosePrice = brickClose;
    m_lastCommittedTime = displayTime;
    m_lastCommittedCloseTime = eventTime;
@@ -1739,43 +1689,51 @@ void CRenkoEngine::PushCompletedBrick(datetime startTime, double open, double cl
 
 void CRenkoEngine::BuildLiveBrick(double &brickOpen, double &brickClose, double &brickHigh, double &brickLow)
 {
-   double blockSize = MathMax((m_lockedBlockSize > 0.0 ? m_lockedBlockSize : m_currentBlockSizePoint), _Point);
-   double priorOpen = (m_lastBarOpen > 0.0) ? m_lastBarOpen : (m_isTrendUp ? m_anchorPrice - blockSize : m_anchorPrice + blockSize);
+   // Live Renko is rendered as an object, not as a custom-symbol live bar.
+   // Continuations grow from the last completed close. Reversals grow from
+   // the reversal candle open, so the overlay never invents a partial MT5 bar.
+   double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      point = _Point;
 
-   if(m_isTrendUp)
-   {
-      if(m_lastLivePrice <= priorOpen)
-      {
-         brickOpen = NormalizePrice(priorOpen);
-         brickClose = NormalizePrice(priorOpen - blockSize);
-      }
-      else
-      {
-         brickOpen = NormalizePrice(m_anchorPrice);
-         brickClose = NormalizePrice(m_anchorPrice + blockSize);
-      }
-   }
-   else
-   {
-      if(m_lastLivePrice >= priorOpen)
-      {
-         brickOpen = NormalizePrice(priorOpen);
-         brickClose = NormalizePrice(priorOpen + blockSize);
-      }
-      else
-      {
-         brickOpen = NormalizePrice(m_anchorPrice);
-         brickClose = NormalizePrice(m_anchorPrice - blockSize);
-      }
-   }
+   double blockSize = MathMax((m_lockedBlockSize > 0.0 ? m_lockedBlockSize : m_currentBlockSizePoint), point);
+   bool bullishCandidate = m_liveCandidateBullish;
+   if(m_lastLivePrice > 0.0 && m_anchorPrice > 0.0)
+      bullishCandidate = (m_lastLivePrice >= m_anchorPrice);
 
-   brickHigh = MathMax(brickOpen, brickClose);
-   brickLow  = MathMin(brickOpen, brickClose);
+   bool reversalCandidate = m_liveCandidateIsReversal || (bullishCandidate != m_isTrendUp);
+   double liveOpen = reversalCandidate
+                     ? CalculateReversalOpen(bullishCandidate, m_anchorPrice, blockSize)
+                     : NormalizePrice(m_anchorPrice);
+   if(liveOpen <= 0.0)
+      liveOpen = (m_anchorPrice > 0.0) ? m_anchorPrice : m_lastLivePrice;
+
+   double targetClose = reversalCandidate
+                        ? CalculateReversalClose(bullishCandidate, m_anchorPrice, blockSize)
+                        : NormalizePrice(m_anchorPrice + (bullishCandidate ? blockSize : -blockSize));
+   double liveClose = (m_liveCandidateClose > 0.0) ? m_liveCandidateClose : m_lastLivePrice;
+   if(liveClose <= 0.0)
+      liveClose = liveOpen;
+
+   double closeMin = MathMin(liveOpen, targetClose);
+   double closeMax = MathMax(liveOpen, targetClose);
+   if(liveClose < closeMin)
+      liveClose = closeMin;
+   if(liveClose > closeMax)
+      liveClose = closeMax;
+
+   brickOpen = NormalizePrice(liveOpen);
+   brickClose = NormalizePrice(liveClose);
 
    if(m_showWicks)
    {
-      brickHigh = MathMax(NormalizePrice(m_boxHigh), brickHigh);
-      brickLow  = MathMin(NormalizePrice(m_boxLow), brickLow);
+      brickHigh = MathMax(NormalizePrice(m_boxHigh), MathMax(brickOpen, brickClose));
+      brickLow = MathMin(NormalizePrice(m_boxLow), MathMin(brickOpen, brickClose));
+   }
+   else
+   {
+      brickHigh = MathMax(brickOpen, brickClose);
+      brickLow = MathMin(brickOpen, brickClose);
    }
 }
 
@@ -1861,7 +1819,7 @@ void CRenkoEngine::PublishDirectLiveRate()
       m_lastPublishedLiveBarTime != previewTime &&
       m_lastPublishedLiveBarTime > m_lastCommittedTime)
    {
-      DeletePublishedLivePreviewRate(m_lastPublishedLiveBarTime, false);
+      DeletePublishedLivePreviewRate(m_lastPublishedLiveBarTime);
    }
 
    MqlRates previewRate[1];
@@ -1885,25 +1843,27 @@ void CRenkoEngine::PublishDirectLiveRate()
    m_lastPublishedLiveBarTime = previewTime;
    RefreshChartHandle();
    if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
-      RequestChartRedraw(m_chartID);
+      ChartRedraw(m_chartID);
 }
 
-void CRenkoEngine::DeletePublishedLivePreviewRate(const datetime barTime, const bool redraw)
+void CRenkoEngine::DeletePublishedLivePreviewRate(const datetime barTime)
 {
-   if(m_lastCommittedTime > 0)
+   datetime deleteTime = (barTime > 0) ? barTime : m_lastPublishedLiveBarTime;
+   if(deleteTime <= 0)
+      return;
+
+   if(deleteTime > m_lastCommittedTime)
    {
-      CustomRatesDelete(m_customSymbol, m_lastCommittedTime + 1, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, (long)(m_lastCommittedTime + 1) * 1000, LONG_MAX);
+      CustomRatesDelete(m_customSymbol, deleteTime, deleteTime);
+      CustomTicksDelete(m_customSymbol, (long)deleteTime * 1000, ((long)deleteTime * 1000) + 999);
    }
 
-   m_lastPublishedLiveBarTime = 0;
+   if(deleteTime == m_lastPublishedLiveBarTime)
+      m_lastPublishedLiveBarTime = 0;
 
-   if(redraw)
-   {
-      RefreshChartHandle();
-      if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
-         RequestChartRedraw(m_chartID);
-   }
+   RefreshChartHandle();
+   if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
+      ChartRedraw(m_chartID);
 }
 
 void CRenkoEngine::PurgeLivePreviewArtifactsForCommit(const datetime committedTime)
@@ -1911,10 +1871,10 @@ void CRenkoEngine::PurgeLivePreviewArtifactsForCommit(const datetime committedTi
    datetime previousCommittedTime = m_lastCommittedTime;
 
    if(m_lastPublishedLiveBarTime > 0 && m_lastPublishedLiveBarTime > previousCommittedTime)
-      DeletePublishedLivePreviewRate(m_lastPublishedLiveBarTime, false);
+      DeletePublishedLivePreviewRate(m_lastPublishedLiveBarTime);
 
    if(m_brickStartTime > 0 && m_brickStartTime > previousCommittedTime && m_brickStartTime != m_lastPublishedLiveBarTime)
-      DeletePublishedLivePreviewRate(m_brickStartTime, false);
+      DeletePublishedLivePreviewRate(m_brickStartTime);
 
    if(committedTime > previousCommittedTime)
    {
@@ -2163,17 +2123,11 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
    string wickName = LivePreviewWickName();
 
    int spanSeconds = ResolveLivePreviewSpanSeconds();
-   datetime tBar = ResolveLiveBarTime((m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent());
-   if(tBar <= 0)
-      tBar = TimeCurrent();
-
-   // Center the custom shape on the forming bar slot (tBar)
-   int halfWidth = spanSeconds / 3;
-   if(halfWidth <= 0)
-      halfWidth = 10;
-   datetime tStart = tBar - halfWidth;
-   datetime tEnd = tBar + halfWidth;
-   datetime tMid = tBar;
+   datetime tStart = ResolveLiveBarTime((m_livePreviewEndTime > 0) ? m_livePreviewEndTime : TimeCurrent());
+   if(tStart <= 0)
+      tStart = TimeCurrent();
+   datetime tEnd = tStart + spanSeconds;
+   datetime tMid = tStart + MathMax(1, spanSeconds / 2);
 
    double bodyTop = MathMax(brickOpen, brickClose);
    double bodyBottom = MathMin(brickOpen, brickClose);
@@ -2201,27 +2155,12 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
       ObjectSetInteger(chartId, bodyName, OBJPROP_ZORDER, 100);
    }
 
-   datetime curT0 = (datetime)ObjectGetInteger(chartId, bodyName, OBJPROP_TIME, 0);
-   double   curP0 = ObjectGetDouble(chartId, bodyName, OBJPROP_PRICE, 0);
-   datetime curT1 = (datetime)ObjectGetInteger(chartId, bodyName, OBJPROP_TIME, 1);
-   double   curP1 = ObjectGetDouble(chartId, bodyName, OBJPROP_PRICE, 1);
-   color    curClr = (color)ObjectGetInteger(chartId, bodyName, OBJPROP_COLOR);
+   ObjectSetInteger(chartId, bodyName, OBJPROP_TIME, 0, tStart);
+   ObjectSetDouble(chartId, bodyName, OBJPROP_PRICE, 0, bodyTop);
+   ObjectSetInteger(chartId, bodyName, OBJPROP_TIME, 1, tEnd);
+   ObjectSetDouble(chartId, bodyName, OBJPROP_PRICE, 1, bodyBottom);
+   ObjectSetInteger(chartId, bodyName, OBJPROP_COLOR, barColor);
 
-   bool bodyChanged = (curT0 != tStart || curT1 != tEnd ||
-                       MathAbs(curP0 - bodyTop) >= point * 0.5 ||
-                       MathAbs(curP1 - bodyBottom) >= point * 0.5 ||
-                       curClr != barColor);
-
-   if(bodyChanged)
-   {
-      ObjectSetInteger(chartId, bodyName, OBJPROP_TIME, 0, tStart);
-      ObjectSetDouble(chartId, bodyName, OBJPROP_PRICE, 0, bodyTop);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_TIME, 1, tEnd);
-      ObjectSetDouble(chartId, bodyName, OBJPROP_PRICE, 1, bodyBottom);
-      ObjectSetInteger(chartId, bodyName, OBJPROP_COLOR, barColor);
-   }
-
-   bool wickChanged = false;
    if(m_showWicks && wickTop > wickBottom)
    {
       if(ObjectFind(chartId, wickName) < 0)
@@ -2234,39 +2173,20 @@ void CRenkoEngine::DrawLivePreviewOverlayOnChart(const long chartId)
          ObjectSetInteger(chartId, wickName, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(chartId, wickName, OBJPROP_HIDDEN, true);
          ObjectSetInteger(chartId, wickName, OBJPROP_ZORDER, 101);
-         wickChanged = true;
       }
 
-      datetime wT0 = (datetime)ObjectGetInteger(chartId, wickName, OBJPROP_TIME, 0);
-      double   wP0 = ObjectGetDouble(chartId, wickName, OBJPROP_PRICE, 0);
-      datetime wT1 = (datetime)ObjectGetInteger(chartId, wickName, OBJPROP_TIME, 1);
-      double   wP1 = ObjectGetDouble(chartId, wickName, OBJPROP_PRICE, 1);
-      color    wClr = (color)ObjectGetInteger(chartId, wickName, OBJPROP_COLOR);
-
-      if(wT0 != tMid || wT1 != tMid ||
-         MathAbs(wP0 - wickTop) >= point * 0.5 ||
-         MathAbs(wP1 - wickBottom) >= point * 0.5 ||
-         wClr != barColor)
-      {
-         ObjectSetInteger(chartId, wickName, OBJPROP_TIME, 0, tMid);
-         ObjectSetDouble(chartId, wickName, OBJPROP_PRICE, 0, wickTop);
-         ObjectSetInteger(chartId, wickName, OBJPROP_TIME, 1, tMid);
-         ObjectSetDouble(chartId, wickName, OBJPROP_PRICE, 1, wickBottom);
-         ObjectSetInteger(chartId, wickName, OBJPROP_COLOR, barColor);
-         wickChanged = true;
-      }
+      ObjectSetInteger(chartId, wickName, OBJPROP_TIME, 0, tMid);
+      ObjectSetDouble(chartId, wickName, OBJPROP_PRICE, 0, wickTop);
+      ObjectSetInteger(chartId, wickName, OBJPROP_TIME, 1, tMid);
+      ObjectSetDouble(chartId, wickName, OBJPROP_PRICE, 1, wickBottom);
+      ObjectSetInteger(chartId, wickName, OBJPROP_COLOR, barColor);
    }
    else
    {
-      if(ObjectFind(chartId, wickName) >= 0)
-      {
-         ObjectDelete(chartId, wickName);
-         wickChanged = true;
-      }
+      ObjectDelete(chartId, wickName);
    }
 
-   if(bodyChanged || wickChanged)
-      RequestChartRedraw(chartId);
+   ChartRedraw(chartId);
 }
 
 void CRenkoEngine::DeleteLivePreviewOverlay()
@@ -2289,7 +2209,7 @@ void CRenkoEngine::DeleteLivePreviewOverlayOnChart(const long chartId) const
    ObjectDelete(chartId, bodyName);
    ObjectDelete(chartId, wickName);
 
-   RequestChartRedraw(chartId);
+   ChartRedraw(chartId);
 }
 
 void CRenkoEngine::PurgeForeignLivePreviewObjectsOnChart(const long chartId, const bool force)
@@ -2350,7 +2270,7 @@ void CRenkoEngine::FlushRamToDisk(bool force)
    if(!force && total < 50 && (GetMicrosecondCount() - m_lastFlushTime) < 250000)
       return;
 
-   DeletePublishedLivePreviewRate(0, false);
+   DeletePublishedLivePreviewRate();
    for(int i = 0; i < total; i++)
    {
       double bodyHigh = MathMax(m_ramRateBuffer[i].open, m_ramRateBuffer[i].close);
@@ -2360,12 +2280,6 @@ void CRenkoEngine::FlushRamToDisk(bool force)
    }
    ResetLastError();
    m_lastFlushTryMs = GetTickCount();
-
-   if(m_ramRateBuffer[0].time > 0)
-   {
-      CustomRatesDelete(m_customSymbol, m_ramRateBuffer[0].time, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, (long)m_ramRateBuffer[0].time * 1000, LONG_MAX);
-   }
 
    bool ratesOk = CustomRatesUpdate(m_customSymbol, m_ramRateBuffer, total);
    int rateErr = _LastError;
@@ -2389,7 +2303,7 @@ void CRenkoEngine::FlushRamToDisk(bool force)
 
    RefreshChartHandle();
    if(m_chartID > 0 && ChartSymbol(m_chartID) == m_customSymbol)
-      RequestChartRedraw(m_chartID);
+      ChartRedraw(m_chartID);
 }
 
 bool CRenkoEngine::ReplayRatesFrom(const datetime fromTime, const bool skipCommitted)
@@ -2969,9 +2883,6 @@ int CRenkoEngine::DrainWorkerClosedBars()
 void CRenkoEngine::SaveState()
 {
    GlobalVariableSet(m_gvPrefix + "_Anchor", m_anchorPrice);
-   GlobalVariableSet(m_gvPrefix + "_LastOpen", m_lastBarOpen);
-   GlobalVariableSet(m_gvPrefix + "_PrevHigh", m_prevCommittedHigh);
-   GlobalVariableSet(m_gvPrefix + "_PrevLow", m_prevCommittedLow);
    GlobalVariableSet(m_gvPrefix + "_Trend", (double)m_isTrendUp);
    GlobalVariableSet(m_gvPrefix + "_LastTime", (double)m_lastCommittedTime);
    GlobalVariableSet(m_gvPrefix + "_LastCloseTime", (double)m_lastCommittedCloseTime);
@@ -2991,15 +2902,6 @@ bool CRenkoEngine::LoadState()
       return false;
 
    m_anchorPrice = GlobalVariableGet(m_gvPrefix + "_Anchor");
-   m_lastBarOpen = GlobalVariableCheck(m_gvPrefix + "_LastOpen")
-                   ? GlobalVariableGet(m_gvPrefix + "_LastOpen")
-                   : 0.0;
-   m_prevCommittedHigh = GlobalVariableCheck(m_gvPrefix + "_PrevHigh")
-                         ? GlobalVariableGet(m_gvPrefix + "_PrevHigh")
-                         : 0.0;
-   m_prevCommittedLow  = GlobalVariableCheck(m_gvPrefix + "_PrevLow")
-                         ? GlobalVariableGet(m_gvPrefix + "_PrevLow")
-                         : 0.0;
    m_isTrendUp = (bool)GlobalVariableGet(m_gvPrefix + "_Trend");
    m_lastCommittedTime = (datetime)GlobalVariableGet(m_gvPrefix + "_LastTime");
    m_hardCommittedTime = m_lastCommittedTime;
@@ -3081,9 +2983,6 @@ void CRenkoEngine::ReconstructStateFromRatePair(const MqlRates &prev, const MqlR
 {
    m_lastClosePrice = last.close;
    m_anchorPrice = last.close;
-   m_lastBarOpen = last.open;
-   m_prevCommittedHigh = MathMax(last.open, last.close);
-   m_prevCommittedLow  = MathMin(last.open, last.close);
    m_lastCommittedTime = last.time;
    m_lastCommittedCloseTime = last.time;
    m_lockedBlockSize = MathAbs(NormalizePrice(last.close) - NormalizePrice(last.open));
@@ -3099,14 +2998,7 @@ void CRenkoEngine::ReconstructStateFromRatePair(const MqlRates &prev, const MqlR
    else m_isTrendUp = (last.close >= last.open);
 
    m_liveCandidateActive = false;
-
-   if(m_lastCommittedTime > 0)
-   {
-      CustomRatesDelete(m_customSymbol, m_lastCommittedTime + 1, LONG_MAX);
-      CustomTicksDelete(m_customSymbol, (long)(m_lastCommittedTime + 1) * 1000, LONG_MAX);
-   }
 }
 
 
 #endif // __MULTIBOTPRO_RENKO_MQH__
-

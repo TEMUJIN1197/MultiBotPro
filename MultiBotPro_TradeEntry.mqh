@@ -63,7 +63,7 @@ void CheckEntrySignals(int symbolIndex)
    ReconcileNormalTrade(symbolIndex);
    // --------------------------------------------------------
    
-   if(IsBotPaused())
+   if(IsPaused)
       return;
    string symbol = SymbolData[symbolIndex].symbol;
    
@@ -619,7 +619,7 @@ void CheckORReversalSignals(int symbolIndex)
                      signal = true;
                     }
 
-               if(signal && !IsBotPaused())
+               if(signal && !IsPaused)
                  {
                   OpenTrade(symbolIndex, ORDER_TYPE_SELL);
 
@@ -654,7 +654,7 @@ void CheckORReversalSignals(int symbolIndex)
                      signal = true;
                     }
 
-               if(signal && !IsBotPaused())
+               if(signal && !IsPaused)
                  {
                   OpenTrade(symbolIndex, ORDER_TYPE_BUY);
 

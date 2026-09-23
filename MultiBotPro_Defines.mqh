@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_DEFINES_MQH__
+﻿#ifndef __MULTIBOTPRO_DEFINES_MQH__
 #define __MULTIBOTPRO_DEFINES_MQH__
 //+------------------------------------------------------------------+
 //|                                          MultiBotPro_Defines.mqh |
@@ -93,25 +93,6 @@ struct SMBPCustomBar
    long     tick_volume;
 };
 
-struct SPositionSnapshot
-{
-   ulong              ticket;
-   string             symbol;
-   ENUM_POSITION_TYPE type;
-   double             volume;
-   double             priceOpen;
-   double             sl;
-   double             tp;
-   double             profit;
-   double             swap;
-   double             commission;
-   long               magic;
-   string             comment;
-   datetime           time;
-   long               identifier;
-   int                basketId;
-};
-
 // --- MANUAL TRADING GLOBALS ---
 #define PREFIX_MANUAL   "MAN_"
 #define MAN_BTN_BUY     "MAN_BTN_BUY"
@@ -119,10 +100,6 @@ struct SPositionSnapshot
 #define MAN_BTN_CLOSE   "MAN_BTN_CLOSE"
 #define MAN_BTN_LOT_P   "MAN_BTN_LOT_P"   // Plus
 #define MAN_BTN_LOT_M   "MAN_BTN_LOT_M"   // Minus
-#define MAN_BTN_LOT_PP  "MAN_BTN_LOT_PP"  // Plus Plus (++0.10)
-#define MAN_BTN_LOT_MM  "MAN_BTN_LOT_MM"  // Minus Minus (--0.10)
-#define MAN_BTN_SCALE_P "MAN_BTN_SCALE_P" // Scale Plus
-#define MAN_BTN_SCALE_M "MAN_BTN_SCALE_M" // Scale Minus
 #define MAN_EDIT_LOT    "MAN_EDIT_LOT"    // Display
 #define BTN_PREFIX_LIST "TRD_LST_"        // Prefix for the list of trades
 #define BTN_PREFIX_MOD  "TRD_MOD_"        // Prefix for the modification UI
@@ -341,8 +318,6 @@ struct SStackTracker
    bool              SLMovedThisTick;           // Flag if SL moved this tick
    datetime          LastSLMoveTime;        // Last time SL moved
    double            LastSLPrice;             // Last SL price
-   int               ProfitMoveCounter;          // Number of times SL has moved in profit
-   int               LastOpenedProfitMove;       // Last profit move level where a stack was opened
 };
 
 // VWAP Data Structure
@@ -436,8 +411,6 @@ public:
       GridStack.SLMovedThisTick = false;
       GridStack.LastSLMoveTime = 0;
       GridStack.LastSLPrice = 0.0;
-      GridStack.ProfitMoveCounter = 0;
-      GridStack.LastOpenedProfitMove = 0;
    }
 };
 
@@ -545,7 +518,6 @@ struct SSymbolData
    double            LastUsedGridRawLot;  // last used raw grid lot (useful for progression reset)
    double            RawNextStackLot;     // raw (un-normalized) next stack lot to use
    double            LastUsedStackRawLot; // last used raw stack lot
-   double            LastValidGridDist;   // cached valid grid distance to prevent visual jumps
 
 
    // Stack tracking for grid
@@ -970,20 +942,6 @@ struct RuntimeServiceManager
   bool MoveFileW(string lpExistingFileName, string lpNewFileName);
   uint GetFileAttributesW(string lpFileName);   // Used as accel.dll-free file-existence check
 #import
-
-//+------------------------------------------------------------------+
-//| High-Performance Global Redraw Gatekeeper                        |
-//| Caps UI redraw frequency to ~30 FPS (33ms) per chart ID          |
-//+------------------------------------------------------------------+
-inline void RequestChartRedraw(const long chartId = 0, const bool force = false)
-{
-   static ulong lastRedrawMs = 0;
-   ulong now = GetTickCount64();
-   if(!force && lastRedrawMs > 0 && (now - lastRedrawMs) < 33)
-      return;
-   lastRedrawMs = now;
-   ChartRedraw(chartId);
-}
 
 #endif // __MULTIBOTPRO_DEFINES_MQH__
 

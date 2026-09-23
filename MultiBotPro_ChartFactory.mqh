@@ -1,4 +1,4 @@
-#ifndef __MULTIBOTPRO_CHARTFACTORY_MQH__
+﻿#ifndef __MULTIBOTPRO_CHARTFACTORY_MQH__
 #define __MULTIBOTPRO_CHARTFACTORY_MQH__
 
 //+------------------------------------------------------------------+
@@ -361,7 +361,7 @@ private:
       while(curr >= 0)
       {
          long next = ChartNext(curr);
-         if(curr != keepChartId && curr != ChartID() && curr != G_MasterHostChartID && ChartSymbol(curr) == sym)
+         if(curr != keepChartId && ChartSymbol(curr) == sym)
          {
             ResetLastError();
             if(ChartClose(curr))
@@ -433,7 +433,7 @@ private:
          DestroyIndicatorOverlayForChart(m_chartID);
       }
 
-      RequestChartRedraw(m_chartID);
+      ChartRedraw(m_chartID);
    }
 
    bool GetStandardBar(string sym, int shift, SMBPCustomBar &outBar)

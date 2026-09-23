@@ -73,11 +73,6 @@ public:
       // heavier management work later in this timer pass.
       PublishHeartbeats(coordinatorMode);
 
-      // Drain worker IPC before heavier account/chart/UI work so the bounded
-      // queue cannot fill during long coordinator management passes.
-      if(coordinatorMode)
-         ProcessWorkerMessages();
-
       if(!m_systemState || !m_riskEngine) return;
 
       // Sync system state with current account
@@ -94,7 +89,7 @@ public:
       }
 
       // Dashboard UI management
-      uint dashboardCadenceMs = MasterIsUiPriorityWindowActive() ? 50 : 75;
+      uint dashboardCadenceMs = MasterIsUiPriorityWindowActive() ? 75 : 500;
       if(ShouldRun(m_lastDashboardUiMs, timerNowMs, dashboardCadenceMs))
          ManageDashboardUi(workerMode);
 
@@ -217,11 +212,7 @@ private:
       MasterPublishWorkerHeartbeat();
 
       if(coordinatorMode)
-      {
          MBP_WriteCoordinatorAliveHeartbeat(G_RuntimeCoordinatorKey, ChartID());
-         MBP_SetCoordinatorPaused(G_RuntimeCoordinatorKey, IsPaused);
-         MBP_SetCoordinatorResetting(G_RuntimeCoordinatorKey, G_ResetPending || MasterHasPendingTradeControlJob());
-      }
    }
 
    void ConsumeUiCommands()
@@ -338,41 +329,23 @@ private:
       if(workerMode) return;
 
       static int auth_timer_ticks = 0;
-      static int failed_network_retries = 0;
       auth_timer_ticks++;
       if(auth_timer_ticks >= 28800)
       {
          if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiBrain(), " Running background license verification...");
          if(!VerifyLicense())
          {
-            if(G_LicenseExpiredExplicit)
+            if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Subscription expired mid-session. Executing a hard shutdown.");
+            for(int i = 0; i < ArraySize(SymbolData); i++)
             {
-               if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Subscription expired mid-session. Executing a hard shutdown.");
-               for(int i = 0; i < ArraySize(SymbolData); i++)
+               if(SymbolData[i].active)
                {
-                  if(SymbolData[i].active)
-                  {
-                     CloseAllGridPositions(i, "License Expired");
-                     ResetGridTracking(i);
-                  }
+                  CloseAllGridPositions(i, "License Expired");
+                  ResetGridTracking(i);
                }
-               CloseAllGlobalPositions("License Expired");
-               ExpertRemove();
-               return;
             }
-            else
-            {
-               // Communication or network error: schedule retry in 5 minutes (2400 ticks at 125ms)
-               auth_timer_ticks = 28800 - 2400;
-               failed_network_retries++;
-               if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT))
-                  Print(EmojiWarning(), " Background license check connection failure (attempt #", failed_network_retries, "). Retrying in 5 minutes.");
-               return;
-            }
-         }
-         else
-         {
-            failed_network_retries = 0;
+            CloseAllGlobalPositions("License Expired");
+            ExpertRemove();
          }
          auth_timer_ticks = 0;
       }
@@ -411,18 +384,6 @@ private:
       if(StringFind(sparam, "Btn_") == 0)
       {
          ProcessButtonClick(sparam);
-         return;
-      }
-
-      if(StringFind(sparam, "MAN_") == 0)
-      {
-         ProcessManualButtonClick(sparam);
-         return;
-      }
-
-      if(StringFind(sparam, BTN_PREFIX_LIST) == 0)
-      {
-         ProcessTradeListClick(sparam);
          return;
       }
 
@@ -503,168 +464,6 @@ private:
       }
 
       RememberDashboardButtonHandled(buttonName);
-      if(ObjectFind(0, buttonName) >= 0)
-         ObjectSetInteger(0, buttonName, OBJPROP_STATE, false);
-      ChartRedraw(0);
-   }
-
-   void ProcessManualButtonClick(const string &buttonName)
-   {
-      RememberDashboardButtonHandled(buttonName);
-      if(ObjectFind(0, buttonName) >= 0)
-         ObjectSetInteger(0, buttonName, OBJPROP_STATE, false);
-      MasterRaiseUiPriorityWindow(1200);
-
-      if(buttonName == MAN_BTN_SCALE_P)
-      {
-         if(Panel_Scale < 2.5) Panel_Scale += 0.1;
-         Panel_ManX = (int)ObjectGetInteger(0, "MAN_BG", OBJPROP_XDISTANCE);
-         Panel_ManY = (int)ObjectGetInteger(0, "MAN_BG", OBJPROP_YDISTANCE);
-         ObjectsDeleteAll(0, "MAN_");
-         DrawManualEntryPanel();
-         ChartRedraw(0);
-         return;
-      }
-      if(buttonName == MAN_BTN_SCALE_M)
-      {
-         if(Panel_Scale > 0.5) Panel_Scale -= 0.1;
-         Panel_ManX = (int)ObjectGetInteger(0, "MAN_BG", OBJPROP_XDISTANCE);
-         Panel_ManY = (int)ObjectGetInteger(0, "MAN_BG", OBJPROP_YDISTANCE);
-         ObjectsDeleteAll(0, "MAN_");
-         DrawManualEntryPanel();
-         ChartRedraw(0);
-         return;
-      }
-      if(buttonName == MAN_BTN_LOT_P)
-      {
-         double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-         if(step <= 0) step = 0.01;
-         Panel_ManualLot += step;
-         Panel_ManualLot = NormalizeDouble(Panel_ManualLot, 2);
-         if(ObjectFind(0, MAN_EDIT_LOT) >= 0)
-            ObjectSetString(0, MAN_EDIT_LOT, OBJPROP_TEXT, DoubleToString(Panel_ManualLot, 2));
-         ChartRedraw(0);
-         return;
-      }
-      if(buttonName == MAN_BTN_LOT_PP)
-      {
-         double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-         if(step <= 0) step = 0.01;
-         Panel_ManualLot += (step * 10);
-         Panel_ManualLot = NormalizeDouble(Panel_ManualLot, 2);
-         if(ObjectFind(0, MAN_EDIT_LOT) >= 0)
-            ObjectSetString(0, MAN_EDIT_LOT, OBJPROP_TEXT, DoubleToString(Panel_ManualLot, 2));
-         ChartRedraw(0);
-         return;
-      }
-      if(buttonName == MAN_BTN_LOT_M)
-      {
-         double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-         if(step <= 0) step = 0.01;
-         double min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-         if(min <= 0) min = 0.01;
-         Panel_ManualLot -= step;
-         if(Panel_ManualLot < min) Panel_ManualLot = min;
-         Panel_ManualLot = NormalizeDouble(Panel_ManualLot, 2);
-         if(ObjectFind(0, MAN_EDIT_LOT) >= 0)
-            ObjectSetString(0, MAN_EDIT_LOT, OBJPROP_TEXT, DoubleToString(Panel_ManualLot, 2));
-         ChartRedraw(0);
-         return;
-      }
-      if(buttonName == MAN_BTN_LOT_MM)
-      {
-         double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-         if(step <= 0) step = 0.01;
-         double min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-         if(min <= 0) min = 0.01;
-         Panel_ManualLot -= (step * 10);
-         if(Panel_ManualLot < min) Panel_ManualLot = min;
-         Panel_ManualLot = NormalizeDouble(Panel_ManualLot, 2);
-         if(ObjectFind(0, MAN_EDIT_LOT) >= 0)
-            ObjectSetString(0, MAN_EDIT_LOT, OBJPROP_TEXT, DoubleToString(Panel_ManualLot, 2));
-         ChartRedraw(0);
-         return;
-      }
-
-      int idx = -1;
-      if(RealSymbol != "") idx = GetSymbolIndex(RealSymbol);
-      if(idx == -1) idx = GetSymbolIndex(_Symbol);
-      if(idx == -1 && ArraySize(SymbolData) > 0) idx = 0;
-
-      if(buttonName == MAN_BTN_BUY)
-      {
-         if(idx >= 0)
-         {
-            if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(">>> MANUAL BUY BUTTON CLICKED for Index ", idx, " (", SymbolData[idx].symbol, ")");
-            OpenTrade(idx, ORDER_TYPE_BUY, Panel_ManualLot, false, true);
-            ChartRedraw(0);
-         }
-         return;
-      }
-      if(buttonName == MAN_BTN_SELL)
-      {
-         if(idx >= 0)
-         {
-            if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(">>> MANUAL SELL BUTTON CLICKED for Index ", idx, " (", SymbolData[idx].symbol, ")");
-            OpenTrade(idx, ORDER_TYPE_SELL, Panel_ManualLot, false, true);
-            ChartRedraw(0);
-         }
-         return;
-      }
-      if(buttonName == MAN_BTN_CLOSE)
-      {
-         if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(">>> MANUAL PANIC CLOSE CLICKED");
-         CloseAllGlobalPositions("Manual Button");
-         if(idx >= 0)
-         {
-            CloseAllGridPositions(idx, "Manual Button");
-            ResetGridTracking(idx);
-         }
-         ChartRedraw(0);
-         return;
-      }
-   }
-
-   void ProcessTradeListClick(const string &buttonName)
-   {
-      RememberDashboardButtonHandled(buttonName);
-      if(ObjectFind(0, buttonName) >= 0)
-         ObjectSetInteger(0, buttonName, OBJPROP_STATE, false);
-      MasterRaiseUiPriorityWindow(1000);
-
-      if(StringFind(buttonName, BTN_PREFIX_LIST + "CLOSE_") == 0)
-      {
-         string ticketStr = StringSubstr(buttonName, StringLen(BTN_PREFIX_LIST + "CLOSE_"));
-         ulong ticket = (ulong)StringToInteger(ticketStr);
-         if(ticket > 0)
-         {
-            Trade.PositionClose(ticket);
-            ObjectsDeleteAll(0, BTN_PREFIX_LIST);
-            ManageTradeListMode();
-            ChartRedraw(0);
-         }
-         return;
-      }
-      if(StringFind(buttonName, BTN_PREFIX_LIST + "EDIT_") == 0)
-      {
-         string ticketStr = StringSubstr(buttonName, StringLen(BTN_PREFIX_LIST + "EDIT_"));
-         ulong ticket = (ulong)StringToInteger(ticketStr);
-         if(ticket > 0 && PositionSelectByTicket(ticket))
-         {
-            Panel_SelectedTicket = ticket;
-            Panel_IsModifying = true;
-            double sl = PositionGetDouble(POSITION_SL);
-            double tp = PositionGetDouble(POSITION_TP);
-            double pr = PositionGetDouble(POSITION_PRICE_OPEN);
-            if(sl == 0) sl = pr;
-            if(tp == 0) tp = pr;
-            CreateLineObj(MP_HL_SL, sl, clrRed);
-            CreateLineObj(MP_HL_TP, tp, clrLime);
-            ObjectsDeleteAll(0, BTN_PREFIX_LIST);
-            ChartRedraw(0);
-         }
-         return;
-      }
    }
 
    void ProcessSymbolRowClick(const string &symbolRowObj)
@@ -691,10 +490,8 @@ private:
             {
                MarkFastChartSwitchPending();
                ResetLastError();
-               ENUM_TIMEFRAMES targetPeriod = MBP_IsSyntheticDataMode(SymbolData[idx].DataMode)
-                                              ? PERIOD_M1
-                                              : (ENUM_TIMEFRAMES)ChartPeriod(0);
-               if(!ChartSetSymbolPeriod(0, targetSymbol, targetPeriod))
+               ENUM_TIMEFRAMES currentPeriod = (ENUM_TIMEFRAMES)ChartPeriod(0);
+               if(!ChartSetSymbolPeriod(0, targetSymbol, currentPeriod))
                   if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Dashboard symbol switch failed for ", targetSymbol, ". Error=", _LastError);
             }
             else

@@ -13,7 +13,6 @@
 //+------------------------------------------------------------------+
 void CheckGridOnTick(int symbolIndex)
   {
-   if(IsBotPaused()) return;
 // Limit grid checks to avoid too frequent operations
    if(TimeCurrent() - SymbolData[symbolIndex].LastGridCheckTime < 1) // Check at most once per second
       return;
@@ -76,7 +75,7 @@ void CheckNewGridLevel(int symbolIndex)
   {
    if(!CheckMaxOpenTrades(symbolIndex)) return;
   }
-   if(IsBotPaused())
+   if(IsPaused)
       return;
 
 // Execution Cooldown: Prevent double-checking while broker processes order
@@ -183,14 +182,9 @@ void CheckNewGridLevel(int symbolIndex)
    else // GRID_DIST_ATR
      {
       double atr[1];
-      if(CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 1, 1, atr) > 0 && atr[0] > 0.0)
+      if(CopyBuffer(SymbolData[symbolIndex].ATR_Handle, 0, 1, 1, atr) > 0)
         {
          currentGridDist = atr[0] * GridDistance;
-         SymbolData[symbolIndex].LastValidGridDist = currentGridDist;
-        }
-      else if(SymbolData[symbolIndex].LastValidGridDist > 0.0)
-        {
-         currentGridDist = SymbolData[symbolIndex].LastValidGridDist;
         }
       else
         {
@@ -1236,12 +1230,10 @@ void ResetGridTracking(int symbolIndex, bool skipReconciliation = false, int bas
   }
 
 //+------------------------------------------------------------------+
-//| Check stack trades on tick (Tightened Stacking Logic)             |
+//| Check stack trades on tick (FIXED: Removed TrailLocked Block)    |
 //+------------------------------------------------------------------+
 void CheckStackTradesOnTick(int symbolIndex)
   {
-   if(IsBotPaused())
-      return;
    if(!StackMode)
       return;
    string symbol = SymbolData[symbolIndex].symbol;
@@ -1252,15 +1244,19 @@ void CheckStackTradesOnTick(int symbolIndex)
       // This flag is set TRUE only when SL actually moves in ApplyPendingTrail
       if(SymbolData[symbolIndex].NonGridSLMovedThisTick)
         {
-         int profitMoves = SymbolData[symbolIndex].NonGridStack.ProfitMoveCounter;
-         int lastOpened = SymbolData[symbolIndex].NonGridStack.LastOpenedProfitMove;
+         int currentCounter = SymbolData[symbolIndex].NonGridStack.Counter;
+         int lastProcessed = SymbolData[symbolIndex].NonGridStack.LastProcessedCounter;
 
-         // Stacking tightened:
-         // 1. Basket/trade SL has moved in profit (profitMoves > 0)
-         // 2. Number of profit moves is strictly greater than StackStart
-         // 3. Exactly one stack trade allowed per profit jump level
-         if(profitMoves > StackStart && profitMoves > lastOpened)
+         // Only stack if counter incremented (meaning SL moved to a new level)
+         // And ensure we respect the "StackStart" level
+         if(currentCounter >= StackStart && currentCounter > lastProcessed)
            {
+            // --- FIX START ---
+            // REMOVED: if(SymbolData[symbolIndex].TrailLocked) return;
+            // Reason: This flag was permanently true if LockTrail was enabled, blocking all stacks.
+            // Since NonGridSLMovedThisTick is true, we know the SL moved, so the Lock is already broken/satisfied.
+            // --- FIX END ---
+
             if(!CheckLastTradeLockedInProfit(symbolIndex, false))
               {
                SymbolData[symbolIndex].NonGridSLMovedThisTick = false;
@@ -1268,8 +1264,9 @@ void CheckStackTradesOnTick(int symbolIndex)
               }
 
             OpenStackTrade(symbolIndex);
-            SymbolData[symbolIndex].NonGridStack.LastOpenedProfitMove = profitMoves;
-            SymbolData[symbolIndex].NonGridStack.LastProcessedCounter = SymbolData[symbolIndex].NonGridStack.Counter;
+
+            // Mark as processed so we don't open multiple times for the same level
+            SymbolData[symbolIndex].NonGridStack.LastProcessedCounter = currentCounter;
            }
 
          // Reset Flag immediately
@@ -1282,24 +1279,24 @@ void CheckStackTradesOnTick(int symbolIndex)
         {
          if(SymbolData[symbolIndex].GridSLMovedThisTick)
            {
-            int profitMoves = SymbolData[symbolIndex].GridStack.ProfitMoveCounter;
-            int lastOpened = SymbolData[symbolIndex].GridStack.LastOpenedProfitMove;
+            int currentCounter = SymbolData[symbolIndex].GridStack.Counter;
+            int lastProcessed = SymbolData[symbolIndex].GridStack.LastProcessedCounter;
 
-            // Stacking tightened:
-            // 1. Basket SL has moved in profit
-            // 2. Number of profit moves is strictly greater than StackStart
-            // 3. Exactly one stack trade allowed per profit jump level
-            if(profitMoves > StackStart && profitMoves > lastOpened)
+            if(currentCounter >= StackStart && currentCounter > lastProcessed)
               {
-               if(!CheckLastTradeLockedInProfit(symbolIndex, true))
+               bool isFirstStack = (SymbolData[symbolIndex].GridStackLevels == 0);
+
+               if(!isFirstStack)
                  {
-                  SymbolData[symbolIndex].GridSLMovedThisTick = false;
-                  return;
+                  if(!CheckLastTradeLockedInProfit(symbolIndex, true))
+                    {
+                     SymbolData[symbolIndex].GridSLMovedThisTick = false;
+                     return;
+                    }
                  }
 
                OpenGridStackTrade(symbolIndex);
-               SymbolData[symbolIndex].GridStack.LastOpenedProfitMove = profitMoves;
-               SymbolData[symbolIndex].GridStack.LastProcessedCounter = SymbolData[symbolIndex].GridStack.Counter;
+               SymbolData[symbolIndex].GridStack.LastProcessedCounter = currentCounter;
               }
             SymbolData[symbolIndex].GridSLMovedThisTick = false;
            }
@@ -1355,76 +1352,47 @@ bool ConfirmBridgeForDirectTrade(int symbolIndex,
    prop.sl_dist_points = slDistPoints;
    prop.tp_dist_points = (tp > 0.0) ? (MathAbs(execPrice - tp) / pt) : 0.0;
 
-   bool sqliteEnabled = V3_RuntimeEnabled(InpV3_EnableSQLiteBridge, InpV3_SQLitePath);
-   string reqIdStr = StringFormat("%I64d", prop.time_msc);
+   string proposalFile = GetProposalFile(InpHedgeChannel);
+   string replyFile    = GetReplyFile(InpHedgeChannel);
+   if(FileIsExist(replyFile, FILE_COMMON))
+      FileDelete(replyFile, FILE_COMMON);
 
-   if(sqliteEnabled)
-   {
-      V3_InsertProposalRow(InpV3_SQLitePath, InpHedgeChannel, reqIdStr, prop);
-   }
-   else
-   {
-      string proposalFile = GetProposalFile(InpHedgeChannel);
-      string replyFile    = GetReplyFile(InpHedgeChannel);
-      if(FileIsExist(replyFile, FILE_COMMON))
-         FileDelete(replyFile, FILE_COMMON);
+   int h = FileOpen(proposalFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
+   if(h == INVALID_HANDLE)
+     {
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Failed to write bridge proposal for direct stack trade.");
+      return false;
+     }
+   FileWriteStruct(h, prop);
+   FileClose(h);
 
-      int h = FileOpen(proposalFile, FILE_WRITE|FILE_BIN|FILE_COMMON);
-      if(h == INVALID_HANDLE)
-      {
-         if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Failed to write bridge proposal for direct stack trade.");
-         return false;
-      }
-      FileWriteStruct(h, prop);
-      FileClose(h);
-   }
-
-   int timeoutMs = (InpV3_HandshakeTimeoutMs > 0) ? InpV3_HandshakeTimeoutMs : 3000;
-   ulong deadlineMs = GetTickCount64() + (ulong)timeoutMs;
-   while(GetTickCount64() < deadlineMs)
-   {
-      if(sqliteEnabled)
-      {
-         long replyRowId = -1;
-         int replyAction = -1;
-         string payloadJson = "";
-         if(V3_SelectReplyRow(InpV3_SQLitePath, InpHedgeChannel, reqIdStr, replyRowId, replyAction, payloadJson))
-         {
-            V3_DeleteReplyRow(InpV3_SQLitePath, replyRowId);
-            return (replyAction == 1);
-         }
-      }
-      else
-      {
-         string replyFile = GetReplyFile(InpHedgeChannel);
-         if(FileIsExist(replyFile, FILE_COMMON))
-         {
-            int hr = FileOpen(replyFile, FILE_READ|FILE_BIN|FILE_COMMON);
-            if(hr != INVALID_HANDLE)
-            {
-               BridgeReply reply;
-               ZeroMemory(reply);
-               FileReadStruct(hr, reply);
-               FileClose(hr);
-               FileDelete(replyFile, FILE_COMMON);
-               string proposalFile = GetProposalFile(InpHedgeChannel);
-               FileDelete(proposalFile, FILE_COMMON);
-               return (reply.action == 1);
-            }
-         }
-      }
-
+   int timeout = (InpV3_HandshakeTimeoutMs > 0) ? (InpV3_HandshakeTimeoutMs / 100) : 30;
+   if(timeout < 1) timeout = 1;
+   while(timeout > 0)
+     {
       if(MBP_ShouldAllowBlockingTradeWait("direct_stack_bridge"))
-         Sleep(5);
+         Sleep(100);
       else
          break;
-   }
 
-   if(!sqliteEnabled)
-   {
-      string proposalFile = GetProposalFile(InpHedgeChannel);
-      FileDelete(proposalFile, FILE_COMMON);
-   }
+      if(FileIsExist(replyFile, FILE_COMMON))
+        {
+         int hr = FileOpen(replyFile, FILE_READ|FILE_BIN|FILE_COMMON);
+         if(hr != INVALID_HANDLE)
+           {
+            BridgeReply reply;
+            ZeroMemory(reply);
+            FileReadStruct(hr, reply);
+            FileClose(hr);
+            FileDelete(replyFile, FILE_COMMON);
+            FileDelete(proposalFile, FILE_COMMON);
+            return (reply.action == 1);
+           }
+        }
+      timeout--;
+     }
+
+   FileDelete(proposalFile, FILE_COMMON);
    if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(EmojiWarning(), " Bridge handshake timed out for direct stack trade.");
    return false;
   }
@@ -1434,9 +1402,6 @@ bool ConfirmBridgeForDirectTrade(int symbolIndex,
 //+------------------------------------------------------------------+
 void OpenStackTrade(int symbolIndex)
   {
-   if(IsBotPaused())
-      return;
-
    // 1. BRIDGE SAFETY CHECK
    if(IsBridgeRuntimeEnabled())
    {
@@ -1464,8 +1429,7 @@ void OpenStackTrade(int symbolIndex)
 // --- FIX END ---
 
 // 2. Calculate Stack Multiplier
-   int stackLevel = SymbolData[symbolIndex].NonGridStack.ProfitMoveCounter - StackStart;
-   if(stackLevel < 1) stackLevel = 1;
+   int stackLevel = SymbolData[symbolIndex].NonGridStack.Counter - StackStart + 1;
    double newMultiplier = StackInitial + (StackBoost * (stackLevel - 1));
    newMultiplier = MathMax(MinStackMultiplier, MathMin(MaxStackMultiplier, newMultiplier));
 
@@ -1480,7 +1444,7 @@ void OpenStackTrade(int symbolIndex)
    if(baseRawStack <= 0.000001)
       baseRawStack = masterVolume;
 
-   double rawStackLot = masterVolume * newMultiplier;
+   double rawStackLot = baseRawStack * SymbolData[symbolIndex].StackMultiplier;
 
    if(GridMaxStake > 0.0 && rawStackLot > GridMaxStake)
       rawStackLot = GridMaxStake;
@@ -1550,9 +1514,6 @@ void OpenStackTrade(int symbolIndex)
 //+------------------------------------------------------------------+
 void OpenGridStackTrade(int symbolIndex)
   {
-   if(IsBotPaused())
-      return;
-
    // 1. BRIDGE SAFETY CHECK
    if(IsBridgeRuntimeEnabled())
    {
@@ -1614,28 +1575,49 @@ void OpenGridStackTrade(int symbolIndex)
       gridType = POSITION_TYPE_BUY;
 
 // ---------------------------------------------------------
-// 2. CALCULATE LOT SIZE (Per User Configuration)
-// Formula: Multiplier = StackInitial + (StackLevel - 1) * StackBoost (clamped)
-// Lot = BaseVol * Multiplier
+// 2. CALCULATE LOT SIZE (Recursive Math)
+// Formula: NewLot = PreviousLot * (PreviousMult + Boost)
 // ---------------------------------------------------------
-   int stackLevel = SymbolData[symbolIndex].GridStack.ProfitMoveCounter - StackStart;
-   if(stackLevel < 1) stackLevel = 1;
-   double currentMult = StackInitial + (StackBoost * (stackLevel - 1));
-   currentMult = MathMax(MinStackMultiplier, MathMin(MaxStackMultiplier, currentMult));
 
-   double baseVol = (gridType == POSITION_TYPE_BUY) ? totalBuyVol : totalSellVol;
-   if(baseVol <= 0.000001)
-      baseVol = (GridFixedLot > 0.0 ? GridFixedLot : FixedLot);
+   double calculatedLot = 0.0;
+   double currentMult = 1.0;
 
-   double calculatedLot = baseVol * currentMult;
+// Is this the VERY FIRST Stack trade for this sequence?
+   if(SymbolData[symbolIndex].GridStackLevels == 0)
+     {
+      // --- TRADE 1 ---
+      // Base = The TOTAL volume of the winning side of the basket
+      // This ensures the stack is proportional to the heavy side of the zone
+      double baseVol = (gridType == POSITION_TYPE_BUY) ? totalBuyVol : totalSellVol;
 
-   if(GridMaxStake > 0.0 && calculatedLot > GridMaxStake)
-      calculatedLot = GridMaxStake;
+      currentMult = StackInitial; // Usually 1.0
+      calculatedLot = baseVol * currentMult;
 
-   SymbolData[symbolIndex].LastStackLot = calculatedLot;
-   SymbolData[symbolIndex].LastStackMult = currentMult;
+      // Initialize Tracking Variables
+      SymbolData[symbolIndex].LastStackLot = calculatedLot;
+      SymbolData[symbolIndex].LastStackMult = currentMult;
 
-   if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(execSymbol, " Stack [Level ", stackLevel, "]: Direction=", EnumToString(gridType), " BaseVol=", baseVol, " * Mult=", currentMult, " = ", calculatedLot);
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(execSymbol, " Stack [Start]: Direction=", EnumToString(gridType), " BaseVol=", baseVol, " * InitMult=", currentMult, " = ", calculatedLot);
+     }
+   else
+     {
+      // --- SUBSEQUENT TRADES ---
+      // Retrieve history
+      double prevLot = SymbolData[symbolIndex].LastStackLot;
+      double prevMult = SymbolData[symbolIndex].LastStackMult;
+
+      // Apply Formula: Multiplier = PreviousMultiplier + Boost
+      currentMult = prevMult + StackBoost;
+
+      // Apply Formula: Lot = PreviousLot * NewMultiplier
+      calculatedLot = prevLot * currentMult;
+
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(execSymbol, " Stack [Next]: PrevLot=", prevLot, " * (PrevMult=", prevMult, " + Boost=", StackBoost, ") = ", calculatedLot);
+
+      // Update Tracking for NEXT time
+      SymbolData[symbolIndex].LastStackLot = calculatedLot;
+      SymbolData[symbolIndex].LastStackMult = currentMult;
+     }
 
 // ---------------------------------------------------------
 // 3. BROKER NORMALIZATION & SAFETY CAPS
@@ -1747,16 +1729,7 @@ void ApplyPendingTrail(int symbolIndex)
                // Trigger Normal Mode Stack
                if(RiskMode == RISK_MODE_NONE)
                  {
-                  double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-                  ENUM_POSITION_TYPE pType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-                  string execSymbol = GetBaseSymbol(symbol);
-                  double pt = SymbolInfoDouble(execSymbol, SYMBOL_POINT);
-                  bool inProfit = (pType == POSITION_TYPE_BUY) ? (SymbolData[symbolIndex].PendingTrailSL > openPrice + pt)
-                                                               : (SymbolData[symbolIndex].PendingTrailSL < openPrice - pt);
-
                   SymbolData[symbolIndex].NonGridStack.Counter++;
-                  if(inProfit)
-                     SymbolData[symbolIndex].NonGridStack.ProfitMoveCounter++;
                   SymbolData[symbolIndex].NonGridSLMovedThisTick = true;
                  }
 
@@ -1781,41 +1754,7 @@ void ApplyPendingTrail(int symbolIndex)
          SmartHedge_OnProtectedStopMove(symbolIndex, true);
 
          // Trigger Grid/Zone Stack
-         string execSymbol = GetBaseSymbol(symbol);
-         double buyVol = 0, sellVol = 0, totalProd = 0, totalVol = 0;
-         for(int p = 0; p < PositionsTotal(); p++)
-           {
-            ulong t = PositionGetTicket(p);
-            if(PositionSelectByTicket(t))
-              {
-               if(PositionGetString(POSITION_SYMBOL) == execSymbol && IsAppTrade(PositionGetInteger(POSITION_MAGIC)))
-                 {
-                  string c = PositionGetString(POSITION_COMMENT);
-                  if(InpEnableMultiBaskets && !IsPositionInBasket(symbolIndex, c))
-                     continue;
-                  if(StringFind(c, "Grid") >= 0 || StringFind(c, "Zone") >= 0 || StringFind(c, "Stack") >= 0)
-                    {
-                     double v = PositionGetDouble(POSITION_VOLUME);
-                     double pr = PositionGetDouble(POSITION_PRICE_OPEN);
-                     if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
-                        buyVol += v;
-                     else
-                        sellVol += v;
-                     totalProd += (v * pr);
-                     totalVol += v;
-                    }
-                 }
-              }
-           }
-         double avgEntry = (totalVol > 0.0) ? (totalProd / totalVol) : 0.0;
-         bool isBuyBasket = (buyVol >= sellVol);
-         double pt = SymbolInfoDouble(execSymbol, SYMBOL_POINT);
-         bool inProfit = (avgEntry > 0.0) && (isBuyBasket ? (SymbolData[symbolIndex].PendingTrailSL > avgEntry + pt)
-                                                          : (SymbolData[symbolIndex].PendingTrailSL < avgEntry - pt));
-
          SymbolData[symbolIndex].GridStack.Counter++;
-         if(inProfit)
-            SymbolData[symbolIndex].GridStack.ProfitMoveCounter++;
          SymbolData[symbolIndex].GridSLMovedThisTick = true;
 
          if(MBP_LogTierEnabled(MBP_LOG_TIER_IMPORTANT)) Print(symbol, " BASKET SL MOVED! Stack Signal Sent. New Level: ", SymbolData[symbolIndex].GridBasketStopLoss);
@@ -2243,7 +2182,7 @@ double CloseLargestOppositePosition(int symbolIndex, ENUM_POSITION_TYPE targetTy
       if(Trade.PositionClose(maxTicket))
         {
          if(MBP_ShouldAllowBlockingTradeWait("rescue_close"))
-            Sleep(15); // Fast delay for broker sync
+            Sleep(100); // Broker sync delay
          return realizedLoss; // Return the amount lost
         }
       else

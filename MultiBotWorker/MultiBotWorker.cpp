@@ -47,7 +47,6 @@ struct Session
     bool resetOpenOnNewDay = false;
 
     double anchorPrice = 0.0;
-    double lastBarOpen = 0.0;
     double boxHigh = 0.0;
     double boxLow = 0.0;
     bool trendUp = true;
@@ -123,26 +122,30 @@ Profile ResolveProfile(const Session& session)
 
 double ContinuationOpen(const Session& session, const bool bullish, const double anchor, const double blockSize)
 {
-    return RoundPrice(session, anchor);
+    const Profile profile = ResolveProfile(session);
+    if(profile.continuationOpenPct <= 0.0)
+        return RoundPrice(session, anchor);
+    const double offset = RoundDistance(session, blockSize * profile.continuationOpenPct);
+    return RoundPrice(session, anchor + (bullish ? -offset : offset));
 }
 
 double ReversalDistance(const Session& session, const double blockSize)
 {
-    return RoundDistance(session, 2.0 * blockSize);
+    return RoundDistance(session, blockSize * ResolveProfile(session).reversalDistancePct);
 }
 
 double ReversalOpen(const Session& session, const bool bullish, const double anchor, const double blockSize)
 {
-    const double priorOpen = (session.lastBarOpen > 0.0)
-        ? session.lastBarOpen
-        : (bullish ? (anchor + blockSize) : (anchor - blockSize));
-    return RoundPrice(session, priorOpen);
+    double offset = RoundDistance(session, blockSize * ResolveProfile(session).reversalOpenPct);
+    if(offset <= 0.0)
+        offset = RoundDistance(session, blockSize);
+    return RoundPrice(session, anchor + (bullish ? offset : -offset));
 }
 
 double ReversalClose(const Session& session, const bool bullish, const double anchor, const double blockSize)
 {
-    const double revOpen = ReversalOpen(session, bullish, anchor, blockSize);
-    return RoundPrice(session, revOpen + (bullish ? blockSize : -blockSize));
+    const double distance = ReversalDistance(session, blockSize);
+    return RoundPrice(session, anchor + (bullish ? distance : -distance));
 }
 
 long long TickSeconds(const long long timeMsc)
@@ -166,7 +169,6 @@ void SeedFromFirstPrice(Session& session, const double price, const long long ti
 {
     session.anchorPrice = RoundPrice(session, price);
     session.lastClosePrice = session.anchorPrice;
-    session.lastBarOpen = session.anchorPrice;
     session.boxHigh = session.anchorPrice;
     session.boxLow = session.anchorPrice;
     session.logicalStartTime = tickSec;
@@ -195,20 +197,9 @@ void PushClosedBar(Session& session, long long startTime, const double open, con
     bar.volume = 1;
     bar.eventTimeMsc = eventTimeMsc;
 
-    if(!session.history.empty())
-    {
-        const auto& prev = session.history.back();
-        if(std::abs(bar.high - prev.high) < session.pointSize * 0.5 &&
-           std::abs(bar.low - prev.low) < session.pointSize * 0.5)
-        {
-            return; // Discard side-by-side artifact bar
-        }
-    }
-
     session.history.push_back(bar);
     session.unreadClosed.push_back(bar);
     session.lastCommittedTime = bar.timeSec;
-    session.lastBarOpen = bar.open;
     session.lastClosePrice = bar.close;
     session.lastLivePrice = bar.close;
 }
@@ -295,52 +286,45 @@ void ProcessTick(Session& session, const double rawPrice, const long long timeMs
     while(++loops < 1000)
     {
         bool action = false;
-        const double priorOpen = (session.lastBarOpen > 0.0)
-            ? session.lastBarOpen
-            : (session.trendUp ? (session.anchorPrice - blockSize) : (session.anchorPrice + blockSize));
+        const double upTarget = RoundPrice(session, session.anchorPrice + blockSize);
+        const double downTarget = RoundPrice(session, session.anchorPrice - blockSize);
+        const double reversalUpTarget = RoundPrice(session, session.anchorPrice + reversalDistance);
+        const double reversalDownTarget = RoundPrice(session, session.anchorPrice - reversalDistance);
 
         if(session.trendUp)
         {
-            const double upTarget = RoundPrice(session, session.anchorPrice + blockSize);
-            const double reversalDownTarget = RoundPrice(session, priorOpen - blockSize);
-
             if(price >= upTarget - point / 2.0)
             {
                 PushClosedBar(session, session.logicalStartTime > 0 ? session.logicalStartTime : tickSec,
-                              session.anchorPrice, upTarget, timeMsc);
-                session.lastBarOpen = session.anchorPrice;
+                              ContinuationOpen(session, true, session.anchorPrice, blockSize), upTarget, timeMsc);
                 session.anchorPrice = upTarget;
                 action = true;
             }
             else if(price <= reversalDownTarget + point / 2.0)
             {
                 PushClosedBar(session, session.logicalStartTime > 0 ? session.logicalStartTime : tickSec,
-                              priorOpen, reversalDownTarget, timeMsc);
-                session.lastBarOpen = priorOpen;
-                session.anchorPrice = reversalDownTarget;
+                              ReversalOpen(session, false, session.anchorPrice, blockSize),
+                              ReversalClose(session, false, session.anchorPrice, blockSize), timeMsc);
+                session.anchorPrice = session.lastClosePrice;
                 session.trendUp = false;
                 action = true;
             }
         }
         else
         {
-            const double downTarget = RoundPrice(session, session.anchorPrice - blockSize);
-            const double reversalUpTarget = RoundPrice(session, priorOpen + blockSize);
-
             if(price <= downTarget + point / 2.0)
             {
                 PushClosedBar(session, session.logicalStartTime > 0 ? session.logicalStartTime : tickSec,
-                              session.anchorPrice, downTarget, timeMsc);
-                session.lastBarOpen = session.anchorPrice;
+                              ContinuationOpen(session, false, session.anchorPrice, blockSize), downTarget, timeMsc);
                 session.anchorPrice = downTarget;
                 action = true;
             }
             else if(price >= reversalUpTarget - point / 2.0)
             {
                 PushClosedBar(session, session.logicalStartTime > 0 ? session.logicalStartTime : tickSec,
-                              priorOpen, reversalUpTarget, timeMsc);
-                session.lastBarOpen = priorOpen;
-                session.anchorPrice = reversalUpTarget;
+                              ReversalOpen(session, true, session.anchorPrice, blockSize),
+                              ReversalClose(session, true, session.anchorPrice, blockSize), timeMsc);
+                session.anchorPrice = session.lastClosePrice;
                 session.trendUp = true;
                 action = true;
             }

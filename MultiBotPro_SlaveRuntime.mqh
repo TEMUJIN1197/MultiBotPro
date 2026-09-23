@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                                     MultiBotPro_SlaveRuntime.mqh |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //+------------------------------------------------------------------+
@@ -220,7 +220,6 @@ void Slave_OnDeinit(const int reason)
    Slave_SaveMap();
    g_SlaveInitialized = false;
    g_SlavePanel.Destroy();
-   V3_CloseCachedDatabase();
    EventKillTimer();
 }
 
@@ -1217,7 +1216,7 @@ void Slave_ProcessSignalFileBatch(const string procFileName, const int maxSignal
          break;
 
       int idx = ArraySize(pending);
-      ArrayResize(pending, idx + 1, 32);
+      ArrayResize(pending, idx + 1);
       pending[idx] = sig;
    }
    FileClose(h);
@@ -1243,7 +1242,7 @@ void Slave_ProcessSignalFileBatch(const string procFileName, const int maxSignal
       return;
    }
 
-   int hw = FileOpenRobust(procFileName, FILE_WRITE|FILE_BIN|FILE_COMMON);
+   int hw = FileOpen(procFileName, FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(hw == INVALID_HANDLE)
       return;
 
