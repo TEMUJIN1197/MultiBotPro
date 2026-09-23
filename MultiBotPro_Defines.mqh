@@ -1,4 +1,4 @@
-﻿#ifndef __MULTIBOTPRO_DEFINES_MQH__
+#ifndef __MULTIBOTPRO_DEFINES_MQH__
 #define __MULTIBOTPRO_DEFINES_MQH__
 //+------------------------------------------------------------------+
 //|                                          MultiBotPro_Defines.mqh |
@@ -869,10 +869,13 @@ struct RuntimeServiceManager
 //|                                     MultiBotPro API IMPORTS      |
 //+------------------------------------------------------------------+
 // accel.dll is intentionally opt-in. The default build is DLL-free so
-// live trading cannot load a native acceleration module before OnInit.
-// Keep compiled in for synthetic chart acceleration. Runtime selection keeps
-// LIVE data mode on native logic and only routes synthetic engines into DLL work.
-#define MBP_COMPILE_ACCEL_DLL
+// live trading never requires a native acceleration module before OnInit.
+// To compile with DLL acceleration, uncomment the line below or define
+// MBP_COMPILE_ACCEL_DLL externally before including this file. At runtime
+// the user input InpEnableAccelDll controls whether DLL paths are used —
+// if the toggle is off (or DLLs are blocked on the VPS/market), synthetic
+// engines route to Python/Native via BuildMasterConfigSnapshot fallback.
+//#define MBP_COMPILE_ACCEL_DLL
 
 #ifdef MBP_COMPILE_ACCEL_DLL
    #import "accel.dll"

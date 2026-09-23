@@ -1,4 +1,4 @@
-﻿#ifndef __MULTIBOTPRO_RENKO_MQH__
+#ifndef __MULTIBOTPRO_RENKO_MQH__
 #define __MULTIBOTPRO_RENKO_MQH__
 //+------------------------------------------------------------------+
 //|                                           MultiBotPro_Renko.mqh |
@@ -345,7 +345,8 @@ void CRenkoEngine::Init(string symbol, string customSymbol,
    m_chartID = FindChartBySymbol(m_customSymbol);
    m_isInitialized = false;
    m_lastDirectPreviewPublishUs = 0;
-   m_workerSessionEnabled = (G_ActiveComputeBackend == COMPUTE_BACKEND_DLL);
+   // Step 1: DLL worker sessions require backend==DLL, compiled accel, and user toggle.
+   m_workerSessionEnabled = (G_ActiveComputeBackend == COMPUTE_BACKEND_DLL && MBP_IsAccelDllCompiled() && InpEnableAccelDll);
    m_workerSessionDisabled = !m_workerSessionEnabled;
    m_workerFailureLogged = false;
 }

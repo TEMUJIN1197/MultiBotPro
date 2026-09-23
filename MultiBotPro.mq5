@@ -421,6 +421,7 @@ input bool InpEnableCoordinator = false; // Coordinator only; spawn worker EAs
 input int InpParallelMaxWorkerCharts = 8; // Max worker charts (overflow stays on last worker)
 input ENUM_MBP_DATA_MODE InpDataMode = MBP_DATA_LIVE; // Price engine
 input ENUM_COMPUTE_BACKEND InpPrimaryComputeBackend = COMPUTE_BACKEND_DLL; // Primary compute backend
+input bool InpEnableAccelDll = true; // Allow accel.dll (off = DLL-free, safe where DLLs are blocked)
 input bool InpAutoFailoverToPython = true; // Auto fallback to Python
 input int InpParallelWorkerHeartbeatMs = 1000; // Worker state publish cadence (ms)
 

@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                     MultiBotPro_SlaveRuntime.mqh |
 //|                                  Copyright 2025, MetaQuotes Ltd. |
 //+------------------------------------------------------------------+
@@ -70,10 +70,33 @@ struct MasterConfig {
 void BuildMasterConfigSnapshot(MasterConfig &cfg) {
    cfg.analysis_mode = InpDataMode;
    cfg.preferred_backend = InpPrimaryComputeBackend;
+   // Step 1 (user-toggle): If DLL acceleration is disabled in inputs, never select DLL.
+   // This makes the bot work in environments where DLL imports are blocked (VPS/market).
+   if(!InpEnableAccelDll && cfg.preferred_backend == COMPUTE_BACKEND_DLL)
+      cfg.preferred_backend = COMPUTE_BACKEND_NATIVE;
+   // Step 1: LIVE data mode always stays native — DLL is only for synthetic engines.
    if(InpDataMode == MBP_DATA_LIVE)
       cfg.preferred_backend = COMPUTE_BACKEND_NATIVE;
-   if(cfg.preferred_backend == COMPUTE_BACKEND_DLL && !MBP_IsAccelDllCompiled())
-      cfg.preferred_backend = COMPUTE_BACKEND_NATIVE;
+   // Step 1: If DLL not compiled or toggle is off, force fallback.
+   if(cfg.preferred_backend == COMPUTE_BACKEND_DLL && (!MBP_IsAccelDllCompiled() || !InpEnableAccelDll))
+   {
+      if(InpAutoFailoverToPython && MBP_DataModeToRenkoFamilyFallbackAvailable(InpDataMode))
+         cfg.preferred_backend = COMPUTE_BACKEND_PYTHON;
+      else
+         cfg.preferred_backend = COMPUTE_BACKEND_NATIVE;
+   }
+}
+
+// Synthetic modes that have a Python fallback path (Renko family + Heiken Renko)
+bool MBP_DataModeToRenkoFamilyFallbackAvailable(const ENUM_MBP_DATA_MODE mode)
+{
+   // All Renko / Median / Turbo / Hybrid / Heiken Renko have a renko_fallback.py path.
+   // LIVE / CustomTime / HeikenAshi / standalone do not need DLL and stay NATIVE.
+   if(mode == MBP_DATA_RENKO || mode == MBP_DATA_MEDIAN_RENKO ||
+      mode == MBP_DATA_TURBO_RENKO || mode == MBP_DATA_HYBRID_RENKO ||
+      mode == MBP_DATA_HEIKEN_RENKO)
+      return true;
+   return false;
 }
 
 // --- MAPPING STRUCT (Shadow Link) ---

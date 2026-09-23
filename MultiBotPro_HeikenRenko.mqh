@@ -1,4 +1,4 @@
-﻿#ifndef __MULTIBOTPRO_HEIKENRENKO_MQH__
+#ifndef __MULTIBOTPRO_HEIKENRENKO_MQH__
 #define __MULTIBOTPRO_HEIKENRENKO_MQH__
 //+------------------------------------------------------------------+
 //|                                     MultiBotPro_HeikenRenko.mqh |
@@ -441,7 +441,7 @@ private:
    // brick. Falls back to the MQL5 loop if the DLL is unavailable or returns 0 bars.
    bool TryDllBuild(const MqlRates &src[], int total)
    {
-      if(G_ActiveComputeBackend != COMPUTE_BACKEND_DLL)
+      if(G_ActiveComputeBackend != COMPUTE_BACKEND_DLL || !MBP_IsAccelDllCompiled() || !InpEnableAccelDll)
       {
          m_dllDisabled = true;
          return false;
