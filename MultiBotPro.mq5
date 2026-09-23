@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿//+------------------------------------------------------------------+
+﻿﻿﻿﻿﻿﻿//+------------------------------------------------------------------+
 //|                                                  MultiBotPro.mq5 |
 //|                               Copyright 2023, Expert Advisor Pro |
 //|                                             https://www.mql5.com |
@@ -1845,12 +1845,16 @@ bool MBP_WriteWorkerHeartbeatRecord(const string workerSymbol,
    if(assignmentSignature != "")
       GlobalVariableSet(globalBase + "_sig", (double)MBP_StableStringHash(assignmentSignature));
 
-   int handle = FileOpen(MBP_WorkerHeartbeatFile(workerSymbol, coordinatorKey), FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE);
+   // Step 8: atomic heartbeat file — write to .tmp then MoveFileW rename to avoid torn reads
+   // Reader with FILE_SHARE_READ|WRITE could see half-written 7x FileWriteString otherwise
+   string heartbeatFile = MBP_WorkerHeartbeatFile(workerSymbol, coordinatorKey);
+   string tmpFile = heartbeatFile + ".tmp";
+   int handle = FileOpen(tmpFile, FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle == INVALID_HANDLE)
    {
       static ulong lastHeartbeatWriteFailLogMs = 0;
-      ulong nowMs = GetTickCount();
-      if(lastHeartbeatWriteFailLogMs == 0 || (nowMs - lastHeartbeatWriteFailLogMs) >= 10000)
+      ulong nowMs = GetTickCount64();
+      if(lastHeartbeatWriteFailLogMs == 0 || (nowMs - lastHeartbeatWriteFailLogMs) >= 10000) // Step 5 monotonic
       {
          if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Worker heartbeat file write failed for ", workerSymbol,
                " key=", coordinatorKey, " Error=", _LastError,
@@ -1871,8 +1875,11 @@ bool MBP_WriteWorkerHeartbeatRecord(const string workerSymbol,
    FileWriteString(handle, "heartbeat=" + IntegerToString((int)effectiveHeartbeat) + "\r\n");
    FileWriteString(handle, "state=" + state + "\r\n");
    FileWriteString(handle, "positions=" + IntegerToString(MathMax(0, linkedPositions)) + "\r\n");
-   FileWriteString(handle, "role=WORKER\r\n");
+   FileWriteString(handle, "role=WORKER
+");
+   FileFlush(handle); // Step 8 atomic
    FileClose(handle);
+   MoveFileW(tmpFile, heartbeatFile); // Step 8 atomic rename (best-effort, fallback is FileOpen overwrite)
    return true;
 }
 

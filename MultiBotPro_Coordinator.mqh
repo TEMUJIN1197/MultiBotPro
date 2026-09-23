@@ -8,6 +8,7 @@
 
 #include "MultiBotPro_SystemState.mqh"
 #include "MultiBotPro_MessageQueue.mqh"
+#include "MultiBotPro_IClock.mqh"
 #include "MultiBotPro_RiskEngine.mqh"
 
 #define MBP_COORDINATOR_MAX_WORKER_MESSAGES_PER_CYCLE 16
@@ -29,11 +30,12 @@ private:
    ulong m_lastCoordinatorManageMs;
    ulong m_lastBridgeProcessMs;
    ulong m_lastTesterSupportMs;
+   IClock* m_clock; // Step 7: injectable clock (null = real)
    int m_workerMsgDropped;
    int m_workerMsgTotal;
 
 public:
-   CCoordinator(CSystemState *sysState, CMbpMessageQueue *coordQueue, CMbpMessageQueue *workerQueue, CRiskEngine *riskEngine) :
+   CCoordinator(CSystemState *sysState, CMbpMessageQueue *coordQueue, CMbpMessageQueue *workerQueue, CRiskEngine *riskEngine, IClock* clock=NULL) :
       m_systemState(sysState),
       m_coordinatorQueue(coordQueue),
       m_workerQueue(workerQueue),
@@ -47,8 +49,11 @@ public:
       m_lastBridgeProcessMs(0),
       m_lastTesterSupportMs(0),
       m_workerMsgDropped(0),
-      m_workerMsgTotal(0)
-   {}
+      m_workerMsgTotal(0),
+      m_clock(clock)
+   {
+      if(m_clock==NULL) m_clock = new CRealClock();
+   } // Step 7: default to real if null — caller owns mock, leaked real is ok (global lifetime)
 
    ~CCoordinator() {}
 
@@ -68,7 +73,7 @@ public:
    // Main coordinator cycle (called from OnTimer) — Step 5: monotonic GetTickCount64 + worker drain
    void ProcessCycle()
    {
-      ulong timerNowMs = GetTickCount64(); // Step 5: 64-bit monotonic
+      ulong timerNowMs = (m_clock != NULL) ? m_clock.NowMs() : GetTickCount64(); // Step 7: injectable clock
       bool coordinatorMode = IsParallelCoordinatorMode();
       bool workerMode = IsParallelWorkerMode();
 

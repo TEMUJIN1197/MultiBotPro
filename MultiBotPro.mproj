@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+﻿<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Project>
    <EAName>MultiBotPro</EAName>
    <Sources>
@@ -30,6 +30,7 @@
       <Source>MultiBotPro_MessageQueue.mqh</Source>
       <Source>MultiBotPro_RiskEngine.mqh</Source>
       <Source>MultiBotPro_BasketBook.mqh</Source>
+      <Source>MultiBotPro_IClock.mqh</Source>
       <Source>MultiBotPro_BoundsChecking.mqh</Source>
       <Source>MultiBotPro_SystemTests.mqh</Source>
       <Source>MultiBotPro_Coordinator.mqh</Source>
