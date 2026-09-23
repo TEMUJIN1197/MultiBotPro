@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿//+------------------------------------------------------------------+
+﻿﻿﻿﻿﻿//+------------------------------------------------------------------+
 //|                                                  MultiBotPro.mq5 |
 //|                               Copyright 2023, Expert Advisor Pro |
 //|                                             https://www.mql5.com |
@@ -240,8 +240,8 @@ string G_RuntimeAssignedSymbols[];
 #define MBP_WORKER_CHART_OPEN_COOLDOWN_MS 15000
 #define MBP_WORKER_STALE_REAPPLY_MS      20000
 #define MBP_WORKER_ENSURE_INTERVAL_MS    2500
-#define MBP_WORKER_READY_STALE_SEC       45
-#define MBP_WORKER_GRACE_STALE_SEC       900
+#define MBP_WORKER_READY_STALE_SEC       90    // Step 13: hysteresis 90s (was 45)
+#define MBP_WORKER_GRACE_STALE_SEC       300   // Step 13: 5m (was 15m 900s) — zombies reaped faster
 
 #define MBP_UI_COMMAND_QUEUE_CAPACITY 16
 
@@ -345,6 +345,15 @@ ENUM_MBP_RUNTIME_ROLE ResolveRuntimeRoleForCurrentChart();
 string MBP_SanitizeRuntimeToken(string value);
 int    MBP_StableStringHash(const string value);
 string MBP_DefaultCoordinatorKey();
+bool MBP_TryLockCoordinatorKey(const string proposedKey) // Step 14: write-once coordinatorKey anti-split
+{
+   if(proposedKey == "") return false;
+   if(G_RuntimeCoordinatorKey == "") { G_RuntimeCoordinatorKey = proposedKey; return true; }
+   if(StringCompare(G_RuntimeCoordinatorKey, proposedKey, false) == 0) return true;
+   if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print(EmojiWarning(), " Coordinator key conflict: locked=", G_RuntimeCoordinatorKey, " proposed=", proposedKey, " — keeping locked.");
+   return false;
+}
+
 string MBP_GetActiveCoordinatorKey();
 bool IsParallelLegacyMode();
 bool IsParallelCoordinatorMode();
@@ -1442,8 +1451,9 @@ string MBP_GetActiveCoordinatorKey()
 
 bool MBP_CoordinatorKeyMatchesRuntime(const string assignedKey, const string activeKey)
 {
+   // Step 14: anti-split — empty keys must NOT match (was return true -> split-brain)
    if(activeKey == "" || assignedKey == "")
-      return true;
+      return false;
    if(StringCompare(assignedKey, activeKey, false) == 0)
       return true;
 
