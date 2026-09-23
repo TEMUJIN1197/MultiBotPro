@@ -582,7 +582,7 @@ bool InitializeSymbolData(string symbol, int index, ENUM_MBP_DATA_MODE globalMod
    SymbolData[index].ZoneNextLot = 0.0;
    SymbolData[index].ZoneResolved = false;
    SymbolData[index].BasketStateCount = 0;
-   for(int basketStateIndex = 0; basketStateIndex < 100; basketStateIndex++)
+   for(int basketStateIndex = 0; basketStateIndex < MBP_MAX_BASKETS; basketStateIndex++)
       SymbolData[index].BasketStates[basketStateIndex] = NULL;
 
 // --- NEW: INIT RECOVERY ---
@@ -664,15 +664,7 @@ void DeinitializeSymbolData(int index)
    ObjectsDeleteAll(0, BTN_PREFIX_LIST, -1, -1);
 
    // E. BUG-B3 FIX: Free heap-allocated basket states to prevent memory leaks
-   for(int bs = 0; bs < SymbolData[index].BasketStateCount; bs++)
-   {
-      if(SymbolData[index].BasketStates[bs] != NULL)
-      {
-         delete SymbolData[index].BasketStates[bs];
-         SymbolData[index].BasketStates[bs] = NULL;
-      }
-   }
-   SymbolData[index].BasketStateCount = 0;
+   MBP_FreeAllBasketStates(SymbolData[index]);
 
    // 3. Force Redraw
    ChartRedraw(0);

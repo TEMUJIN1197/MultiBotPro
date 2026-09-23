@@ -9,6 +9,10 @@
 
 #include <Arrays\ArrayObj.mqh>
 
+#ifndef MBP_MAX_BASKETS
+#define MBP_MAX_BASKETS 100
+#endif
+
 #define DASH_BUTTON_HANDOFF_MS 250
 #define DASH_HEARTBEAT_CYCLE_MS 3000
 #define DASH_HEARTBEAT_ACTIVE_MS 1500
@@ -704,18 +708,38 @@ struct SSymbolData
    // ============================================================================
    // Per-(BasketId, Symbol) tracking for grid phases and zone boundaries.
    // Stored as pointer array so individual states can be returned by pointer.
-   SBasketState* BasketStates[100];        // Max 100 concurrent baskets per symbol (heap-allocated)
+   SBasketState* BasketStates[MBP_MAX_BASKETS];        // Max 100 concurrent baskets per symbol (heap-allocated)
    int           BasketStateCount;         // Current number of basket states tracked
 
 };
 
 void MBP_ResetSymbolPointerState(SSymbolData &symbolData)
 {
+   // Step 2a fix: delete live baskets before clearing (was leak: just NULLed).
+   for(int i = 0; i < symbolData.BasketStateCount; i++)
+   {
+      if(CheckPointer(symbolData.BasketStates[i]) != POINTER_INVALID)
+         delete symbolData.BasketStates[i];
+      symbolData.BasketStates[i] = NULL;
+   }
+   for(int i = symbolData.BasketStateCount; i < MBP_MAX_BASKETS; i++)
+      symbolData.BasketStates[i] = NULL;
    symbolData.ChartFactories = NULL;
    symbolData.BasketStateCount = 0;
+}
 
-   for(int i = 0; i < 100; i++)
+// Step 2a: free all baskets for a symbol — canonical cleanup for deinit/wipe
+void MBP_FreeAllBasketStates(SSymbolData &symbolData)
+{
+   for(int i = 0; i < symbolData.BasketStateCount; i++)
+   {
+      if(CheckPointer(symbolData.BasketStates[i]) != POINTER_INVALID)
+         delete symbolData.BasketStates[i];
       symbolData.BasketStates[i] = NULL;
+   }
+   for(int i = symbolData.BasketStateCount; i < MBP_MAX_BASKETS; i++)
+      symbolData.BasketStates[i] = NULL;
+   symbolData.BasketStateCount = 0;
 }
   
 // --- FILTER TRACKING STRUCTURE ---
@@ -781,9 +805,9 @@ SBasketState* GetOrCreateBasketState(SSymbolData &symbolData, int basketId)
       return existing;
 
    // Overflow guard
-   if(symbolData.BasketStateCount >= 100)
+   if(symbolData.BasketStateCount >= MBP_MAX_BASKETS)
    {
-      if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print("ERROR: Maximum basket states (100) exceeded for symbol ", symbolData.symbol);
+      if(MBP_LogTierEnabled(MBP_LOG_TIER_CRITICAL)) Print("ERROR: Maximum basket states (MBP_MAX_BASKETS) exceeded for symbol ", symbolData.symbol);
       return NULL;
    }
 
