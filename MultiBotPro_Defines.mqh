@@ -459,6 +459,44 @@ struct SCoordinatorState
    ulong  lastUpdate;             // Timestamp of last coordinator update (Unix milliseconds)
 };
 
+// --- Step 2b: Shard constants (centralize the 6 hardcoded [100] caps) ---
+#ifndef MBP_MAX_BOX_LEVELS
+#define MBP_MAX_BOX_LEVELS 100
+#endif
+#ifndef MBP_MAX_GRID_LEVELS
+#define MBP_MAX_GRID_LEVELS 100
+#endif
+#ifndef MBP_MAX_OPEN_POSITIONS
+#define MBP_MAX_OPEN_POSITIONS 100
+#endif
+
+// Box warmup phase (replaces flat 9 bool/int/ulong fields with one enum + struct)
+enum ENUM_MBP_BOX_WARMUP_PHASE
+{
+   MBP_WARMUP_IDLE = 0,
+   MBP_WARMUP_QUEUED = 1,
+   MBP_WARMUP_IN_PROGRESS = 2,
+   MBP_WARMUP_DONE = 3
+};
+
+// Step 2b: Named sub-views of SSymbolData (header-only, binary-compatible).
+// SSymbolData keeps legacy flat members for compat; these structs give
+// a stable domain API for Coordinator/Indicator/Grid call sites.
+// Layout intentionally mirrors the flat member order for 1:1 future migration.
+struct SMarketIdentity { string symbol; string BaseSymbol; string AnalysisSymbol; bool active; int BasketId; bool IsPrimaryBasket; bool BasketActive; ENUM_MBP_DATA_MODE DataMode; ENUM_MBP_RENKO_FAMILY RenkoFamily; };
+struct SIndicatorHandles { int MA_Handles[5][7]; int ATR_Handle; int MA_SL_Handle; int ADX_Handle; };
+struct SVWAPBundle { SVWAPData VWAP1; SVWAPData VWAP2_High; SVWAPData VWAP2_Low; SVWAPData VWAP3; };
+struct SBoxLevelState { double BoxHigh[MBP_MAX_BOX_LEVELS]; double BoxLow[MBP_MAX_BOX_LEVELS]; int BoxHighCount; int BoxLowCount; datetime BoxHighStartTime; datetime BoxLowStartTime; };
+struct SGridTradeState { double OriginalBalance; double CurrentStakeMultiplier; int GridLevels; double GridEntries[MBP_MAX_GRID_LEVELS]; double StackMultiplier; int StackUpdates; int TrailUpdateCount; double LastSLPrice; STradePosition OpenPositions[MBP_MAX_OPEN_POSITIONS]; int PositionCount; datetime LastTradeTime; double DailyProfitLoss; datetime LastDailyReset; };
+struct SGridPhaseState { bool GridTargetReached; bool GridInTrailing; bool GridInStacking; double GridBasketStopLoss; double GridBasketTakeProfit; double GridBasketEntry; double GridBasketVolume; double GridTargetProfit; double RawNextGridLot; double LastUsedGridRawLot; double RawNextStackLot; double LastUsedStackRawLot; int GridStackLevels; int GridTrailUpdates; double GridStackMultiplier; bool StackLastTrailUpdate; datetime LastStackTime; double LastStackSL; bool TrailLocked; double LockBreakEvenPrice; bool LockTPReached; SStackTracker NonGridStack; SStackTracker GridStack; double StackPrevSL; bool StackSLInitialized; double GridStackPrevSL; bool GridStackSLInitialized; int StackLastOpenedCounter; int GridStackLastOpenedCounter; int CurrentGridSequence; datetime LastGridReset; double GridStakeMultiplier; double LastStackLot; double LastStackMult; int GridSequenceDepth; bool GridPhase1Active; bool GridPhase2Active; double PendingTrailSL; bool HasPendingTrail; bool GridTPHit; double GridTPHitPrice; bool GridStackAlreadyAddedThisUpdate; bool StackAlreadyAddedThisUpdate; datetime LastGridCheckTime; double GridAggressiveTargetPrice; bool PruningOccurredThisSequence; };
+struct SZoneRecoveryState { bool ZoneActive; double ZoneTopPrice; double ZoneBottomPrice; int ZoneSeqCount; double ZoneNextLot; bool ZoneResolved; };
+struct SLedgerRecoveryState { double AccumulatedPruningLoss; double AccumulatedCriticalLoss; double CurrentRecoveryPortion; int RecoveryIteration; double LedgerPruningIn; double LedgerPruningOut; double LedgerCriticalIn; double LedgerCriticalOut; ulong LastDebtEventId; };
+struct SShadowAIState { int Dyn_MA1_Period; int Dyn_MA2_Period; int Dyn_Box_Lookback; int Dyn_ADX_Period; double Dyn_ADX_MinLevel; double Dyn_CurrencyStrengthDelta; double Dyn_GridMultiplier; bool Dyn_NLP_Killswitch; datetime LastShadowUpdate; int Handle_MA1; int Handle_MA2; int Handle_ADX; };
+struct SBoxWarmupState { ENUM_MBP_BOX_WARMUP_PHASE phase; bool BoxHistoryWarmupQueued; bool BoxHistoryWarmupDone; ulong BoxHistoryWarmupNextAttemptMs; bool BoxHistoryWarmupInProgress; int BoxHistoryWarmupCursor; int BoxHistoryWarmupBarsToCheck; double BoxHistoryWarmupPrevHigh; double BoxHistoryWarmupPrevLow; int BoxHistoryWarmupLastTotalBars; };
+struct SOpeningRangeState { bool OR_Active; datetime OR_ExpiryTime; double OR_High; double OR_Low; bool OR_WasBullish; bool OR_BreakoutOccurred; datetime OR_LastCheckedBar; int OR_LastDay; };
+struct SAlertState { datetime LastAlertTime; string LastSignal; double PreviousMasterSL; double PreviousBasketSL; bool MasterSLMoved; bool BasketSLMoved; bool SmartHedgeFirstLockSeen; bool SmartHedgeReleased; datetime SmartHedgeReleasedAt; bool TPActivated; double InitialTP; ulong MasterTicket; double MasterSL; double MasterEntry; ENUM_POSITION_TYPE MasterType; bool MasterHasValidSL; bool NonGridSLMovedThisTick; bool GridSLMovedThisTick; };
+struct STickCursor { datetime LastTickTime; datetime LastCandleTime; bool ProcessedThisCandle; long LastTickMsc; long LastProcessedSourceTickMsc; int LastProcessedSourceTickCountAtMsc; datetime LastVWAPUpdate; bool NewVWAPHighLowSet; long lastUpdate; };
+
 // Symbol data structure
 struct SSymbolData
 {

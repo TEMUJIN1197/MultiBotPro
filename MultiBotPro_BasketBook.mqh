@@ -2,11 +2,11 @@
 #define __MULTIBOTPRO_BASKETBOOK_MQH__
 //+------------------------------------------------------------------+
 //|                                      MultiBotPro_BasketBook.mqh  |
-//|  Step 2a: Leak-free basket book with centralized cap (100)       |
+//|  Step 2a/2b: Leak-free basket book with centralized cap (100)    |
 //|  Requires SBasketState already defined (include after Defines).  |
-//|  Embedded in SSymbolData as CBasketBook basketBook; legacy       |
-//|  BasketStates[100]/BasketStateCount kept as deprecated alias and |
-//|  synced for backward compat (removed in Step 2b shard).          |
+//|  After Step 2b, Defines provides sharded views (optional). This  |
+//|  class can be embedded as CBasketBook basketBook inside          |
+//|  SSymbolData in a follow-up or used standalone by coordinator.   |
 //+------------------------------------------------------------------+
 
 #ifndef MBP_MAX_BASKETS
